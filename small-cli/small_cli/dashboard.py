@@ -1,0 +1,349 @@
+"""`small dashboard`: локальная страница со списком микро-приложений в папке.
+
+Приложением считается папка, где есть small.json и/или .small.json. Привязку и ссылки берём из локальных
+файлов. Если задан RAILWAY_API_TOKEN, для привязанных приложений дополнительно спрашиваем у Railway статус
+последнего деплоя; любая ошибка (сеть, таймаут, токен) просто оставляет локальные данные.
+Значения переменных из small.json и сам токен Railway никогда не отдаются в браузер.
+"""
+
+import json
+import os
+import re
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse
+
+from .archive import ALWAYS_IGNORED
+from .config import CONFIG_FILE, STATE_FILE, ConfigError, load_config, load_state
+from .railway import Railway
+
+DEFAULT_PORT = 3000
+MAX_DEPTH = 6  # глубже не ищем: `small dashboard` из корня диска не должен обходить весь диск
+DOMAIN_RE = re.compile(r"[A-Za-z0-9.-]+\Z")
+RAILWAY_ID_RE = re.compile(r"[A-Za-z0-9-]+\Z")
+DEPLOY_STATUS_RE = re.compile(r"[A-Z_]{1,32}\Z")
+LIVE_TIMEOUT = 5      # секунд на запрос к Railway: кнопка «Обновить» не должна зависать
+LIVE_WORKERS = 8
+
+
+def scan_apps(root, max_depth=MAX_DEPTH):
+    """Находит приложения под root. Внутрь найденного приложения не спускается."""
+    root = Path(root).resolve()
+    apps = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        folder = Path(dirpath)
+        if CONFIG_FILE in filenames or STATE_FILE in filenames:
+            apps.append(describe_app(folder, root))
+            dirnames[:] = []
+            continue
+        depth = len(folder.relative_to(root).parts)
+        dirnames[:] = sorted(d for d in dirnames if d not in ALWAYS_IGNORED) if depth < max_depth else []
+    return sorted(apps, key=lambda a: a["relPath"].lower())
+
+
+def describe_app(folder, root):
+    rel = folder.relative_to(root).as_posix()
+    app = {"name": folder.name, "path": str(folder), "relPath": "." if rel == "." else rel,
+           "status": "not_deployed", "url": None, "railwayUrl": None, "envNames": [], "errors": [],
+           "serviceId": None, "environmentId": None, "deployment": None}
+    try:
+        config = load_config(folder / CONFIG_FILE)
+    except ConfigError as e:
+        config = {"name": None, "env": {}}
+        app["errors"].append(str(e))
+    try:
+        state = load_state(folder / STATE_FILE)
+    except ConfigError as e:
+        state = {}
+        app["errors"].append(str(e).replace(str(folder / STATE_FILE), STATE_FILE))
+
+    app["name"] = config["name"] or (state.get("name") if isinstance(state.get("name"), str) else None) or folder.name
+    app["envNames"] = sorted(config["env"])  # только имена: значения — секреты
+
+    if state.get("serviceId"):
+        app["status"] = "linked"
+        project_id, service_id = state.get("projectId"), state.get("serviceId")
+        if all(_is_id(v) for v in (project_id, service_id)):
+            app["railwayUrl"] = "https://railway.com/project/%s/service/%s" % (project_id, service_id)
+        if _is_id(service_id) and _is_id(state.get("environmentId")):
+            app["serviceId"], app["environmentId"] = service_id, state["environmentId"]
+        domain = state.get("domain")
+        if domain:
+            if isinstance(domain, str) and DOMAIN_RE.match(domain):
+                app["url"] = "https://" + domain
+            else:
+                app["errors"].append("%s: некорректный домен %r" % (STATE_FILE, domain))
+    return app
+
+
+def _is_id(value):
+    return isinstance(value, str) and bool(RAILWAY_ID_RE.match(value))
+
+
+def add_live_status(apps, token, timeout=LIVE_TIMEOUT):
+    """Дописывает app["deployment"] = {"status", "createdAt"} из Railway для привязанных приложений.
+
+    Возвращает режим для страницы: "off" (нет токена), "on" (Railway ответил) или "error" (не ответил ни разу).
+    Никогда не бросает исключений: живой статус — украшение, локальные данные важнее.
+    """
+    linked = [app for app in apps if app["serviceId"] and app["environmentId"]]
+    if not token:
+        return "off"
+    if not linked:
+        return "on"
+    api = Railway(token)
+
+    def fetch(app):
+        try:
+            return app, api.latest_deployment(app["serviceId"], app["environmentId"], timeout=timeout), True
+        except Exception:  # сеть, таймаут, неверный токен, удалённый сервис, неожиданный ответ
+            return app, None, False
+
+    answered = False
+    with ThreadPoolExecutor(max_workers=min(LIVE_WORKERS, len(linked))) as pool:
+        for app, deployment, ok in pool.map(fetch, linked):
+            answered = answered or ok
+            if ok and isinstance(deployment, dict):
+                status = deployment.get("status")
+                if isinstance(status, str) and DEPLOY_STATUS_RE.match(status):
+                    created = deployment.get("createdAt")
+                    app["deployment"] = {"status": status, "createdAt": created if isinstance(created, str) else None}
+    return "on" if answered else "error"
+
+
+class DashboardServer(ThreadingHTTPServer):
+    daemon_threads = True
+    # В Windows SO_REUSEADDR разрешает занять порт, который уже слушает другой процесс.
+    allow_reuse_address = sys.platform != "win32"
+
+    def __init__(self, address, root, token=None):
+        super().__init__(address, DashboardHandler)
+        self.root = Path(root).resolve()
+        self.token = token  # токен Railway для живых статусов; в браузер не уходит
+        port = self.server_address[1]
+        # Защита от DNS rebinding: чужой сайт, указавший свой домен на 127.0.0.1, получит 403.
+        self.allowed_hosts = {"127.0.0.1:%d" % port, "localhost:%d" % port}
+
+    @property
+    def url(self):
+        return "http://127.0.0.1:%d/" % self.server_address[1]
+
+
+def start_server(root, port=DEFAULT_PORT, token=None):
+    """Сервер на 127.0.0.1:port; если порт занят — на свободном случайном."""
+    try:
+        return DashboardServer(("127.0.0.1", port), root, token)
+    except OSError:
+        if port == 0:
+            raise
+        return DashboardServer(("127.0.0.1", 0), root, token)
+
+
+class DashboardHandler(BaseHTTPRequestHandler):
+    server_version = "small-dashboard"
+
+    def do_GET(self):
+        if self.headers.get("Host") not in self.server.allowed_hosts:
+            return self._send(403, "text/plain; charset=utf-8", b"Forbidden")
+        path = urlparse(self.path).path
+        if path == "/":
+            return self._send(200, "text/html; charset=utf-8", PAGE.encode("utf-8"))
+        if path == "/api/apps":
+            apps = scan_apps(self.server.root)
+            live = add_live_status(apps, self.server.token)
+            payload = {"root": str(self.server.root),
+                       "scannedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+                       "live": live, "apps": apps}
+            return self._send(200, "application/json; charset=utf-8",
+                              json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        self._send(404, "text/plain; charset=utf-8", b"Not found")
+
+    def _send(self, code, content_type, body):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+PAGE = r"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>small dashboard</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+</head>
+<body class="min-h-screen bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
+<main class="mx-auto max-w-4xl px-4 py-10">
+  <header class="mb-6 flex flex-wrap items-end justify-between gap-4">
+    <div class="min-w-0">
+      <h1 class="text-2xl font-semibold tracking-tight">small dashboard</h1>
+      <p class="mt-1 truncate text-sm text-stone-500 dark:text-stone-400">
+        Микро-приложения в <span id="root" class="font-mono"></span>
+      </p>
+    </div>
+    <button id="refresh" type="button"
+      class="inline-flex items-center gap-2 rounded-lg bg-stone-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-stone-700 disabled:cursor-wait disabled:opacity-60 dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-white">
+      <svg id="spinner" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/>
+      </svg>
+      Обновить
+    </button>
+  </header>
+
+  <p id="summary" class="mb-4 text-sm text-stone-500 dark:text-stone-400"></p>
+  <ul id="apps" class="grid gap-3"></ul>
+
+  <div id="empty" hidden class="rounded-xl border border-dashed border-stone-300 p-10 text-center dark:border-stone-700">
+    <p class="font-medium">Приложений не найдено</p>
+    <p class="mt-1 text-sm text-stone-500 dark:text-stone-400">
+      Здесь нет папок с <code class="font-mono">small.json</code> или <code class="font-mono">.small.json</code>.
+      Создайте приложение: <code class="font-mono">small init my-app</code>
+    </p>
+  </div>
+  <div id="error" hidden class="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function plural(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
+const STATUS = {
+  linked: ["Привязан к Railway", "bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-400/30", "bg-emerald-500"],
+  not_deployed: ["Не задеплоен", "bg-stone-100 text-stone-600 ring-stone-500/20 dark:bg-stone-800 dark:text-stone-300 dark:ring-stone-400/20", "bg-stone-400"],
+};
+
+// Живой статус последнего деплоя из Railway: [подпись, классы бейджа, классы точки].
+const DEPLOY_TONES = {
+  ok: ["bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-400/30", "bg-emerald-500"],
+  busy: ["bg-amber-50 text-amber-800 ring-amber-600/20 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-400/30", "bg-amber-500 animate-pulse"],
+  bad: ["bg-red-50 text-red-700 ring-red-600/20 dark:bg-red-950 dark:text-red-300 dark:ring-red-400/30", "bg-red-500"],
+  idle: ["bg-sky-50 text-sky-700 ring-sky-600/20 dark:bg-sky-950 dark:text-sky-300 dark:ring-sky-400/30", "bg-sky-500"],
+  other: ["bg-stone-100 text-stone-600 ring-stone-500/20 dark:bg-stone-800 dark:text-stone-300 dark:ring-stone-400/20", "bg-stone-400"],
+};
+const DEPLOY_STATUS = {
+  SUCCESS: ["ok", "работает"], SLEEPING: ["idle", "спит"],
+  QUEUED: ["busy", "в очереди"], WAITING: ["busy", "ожидает"], INITIALIZING: ["busy", "запускается"],
+  BUILDING: ["busy", "сборка"], DEPLOYING: ["busy", "выкатывается"],
+  FAILED: ["bad", "сборка упала"], CRASHED: ["bad", "приложение упало"],
+  REMOVED: ["other", "удалён"], REMOVING: ["other", "удаляется"], SKIPPED: ["other", "пропущен"],
+  NEEDS_APPROVAL: ["other", "ждёт подтверждения"],
+};
+
+function deployBadge(deployment) {
+  const [tone, hint] = DEPLOY_STATUS[deployment.status] || ["other", ""];
+  const [badgeClass, dotClass] = DEPLOY_TONES[tone];
+  const badge = el("span", "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 font-mono text-xs font-medium ring-1 ring-inset " + badgeClass);
+  badge.append(el("span", "h-1.5 w-1.5 rounded-full " + dotClass), document.createTextNode(deployment.status));
+  const when = deployment.createdAt ? new Date(deployment.createdAt).toLocaleString("ru-RU") : "";
+  badge.title = "Последний деплой в Railway" + (hint ? ": " + hint : "") + (when ? ", " + when : "");
+  return badge;
+}
+
+const ARROW ='<svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+  'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg>';
+
+function link(href, text) {
+  const a = el("a", "inline-flex items-center gap-1 font-medium text-blue-600 hover:underline dark:text-blue-400", text);
+  a.insertAdjacentHTML("beforeend", ARROW);  // константа, не данные пользователя
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  return a;
+}
+
+function card(app) {
+  const li = el("li", "rounded-xl border border-stone-200 bg-white p-5 shadow-sm dark:border-stone-800 dark:bg-stone-900");
+  const head = el("div", "flex flex-wrap items-center justify-between gap-2");
+  head.append(el("h2", "text-base font-semibold", app.name));
+  const [label, badgeClass, dotClass] = STATUS[app.status] || STATUS.not_deployed;
+  const badge = el("span", "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset " + badgeClass);
+  badge.append(el("span", "h-1.5 w-1.5 rounded-full " + dotClass), document.createTextNode(label));
+  const badges = el("div", "flex flex-wrap items-center gap-2");
+  if (app.deployment) badges.append(deployBadge(app.deployment));
+  badges.append(badge);
+  head.append(badges);
+  li.append(head);
+
+  const links = el("div", "mt-3 flex flex-wrap gap-x-5 gap-y-1 text-sm");
+  if (app.url) links.append(link(app.url, app.url.replace("https://", "")));
+  if (app.railwayUrl) links.append(link(app.railwayUrl, "Railway"));
+  if (!app.url && !app.railwayUrl) links.append(el("span", "text-stone-500 dark:text-stone-400", "Ещё не деплоилось: small deploy"));
+  li.append(links);
+
+  li.append(el("p", "mt-3 break-all font-mono text-xs text-stone-500 dark:text-stone-400", app.path));
+
+  if (app.envNames.length) {
+    const env = el("div", "mt-3 flex flex-wrap items-center gap-1.5");
+    env.append(el("span", "text-xs text-stone-500 dark:text-stone-400", "Переменные:"));
+    for (const name of app.envNames) {
+      env.append(el("span", "rounded bg-stone-100 px-1.5 py-0.5 font-mono text-xs dark:bg-stone-800", name));
+    }
+    li.append(env);
+  }
+  for (const error of app.errors) {
+    li.append(el("p", "mt-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-300", "⚠ " + error));
+  }
+  return li;
+}
+
+async function refresh() {
+  const button = $("refresh");
+  button.disabled = true;
+  $("spinner").classList.add("animate-spin");
+  try {
+    const res = await fetch("/api/apps", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    $("root").textContent = data.root;
+    $("apps").replaceChildren(...data.apps.map(card));
+    $("empty").hidden = data.apps.length > 0;
+    $("error").hidden = true;
+    const n = data.apps.length;
+    const linked = data.apps.filter((a) => a.status === "linked").length;
+    const time = new Date(data.scannedAt).toLocaleTimeString("ru-RU");
+    const live = {
+      on: "статусы деплоя из Railway",
+      off: "офлайн-режим: задайте RAILWAY_API_TOKEN для живых статусов",
+      error: "Railway не ответил, показаны локальные данные",
+    }[data.live] || "";
+    $("summary").textContent = (n
+      ? `${n} ${plural(n, "приложение", "приложения", "приложений")} · ${linked} привязано к Railway · обновлено в ${time}`
+      : `Обновлено в ${time}`) + (linked && live ? " · " + live : "");
+  } catch (e) {
+    $("error").textContent = "Не удалось получить список: " + e.message + ". Запущен ли small dashboard?";
+    $("error").hidden = false;
+  } finally {
+    button.disabled = false;
+    $("spinner").classList.remove("animate-spin");
+  }
+}
+
+$("refresh").addEventListener("click", refresh);
+refresh();
+</script>
+</body>
+</html>
+"""

@@ -1,0 +1,964 @@
+"""Сквозные тесты `small deploy` против локального мока Railway API.
+
+Запуск: python -m unittest discover -s tests
+"""
+
+import contextlib
+import http.client
+import importlib.util
+import io
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tarfile
+import tempfile
+import threading
+import time
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
+from urllib.parse import parse_qs, urlparse
+
+from small_cli.archive import IgnoreRules
+from small_cli.cli import load_config, main
+from small_cli.dashboard import DashboardServer, add_live_status, scan_apps, start_server
+from small_cli.scaffold import TEMPLATES_DIR
+
+TOKEN = "test-token"
+
+
+class MockRailway:
+    """Имитирует нужную часть backboard.railway.com: /graphql/v2 и /project/.../up."""
+
+    def __init__(self, final_status="SUCCESS", workspaces=None, domain_free=True, projects=None, domain=None,
+                 live=None, delay=0):
+        self.final_status = final_status
+        self.live = live or {}  # serviceId -> статус последнего деплоя ("" — деплоев не было)
+        self.delay = delay      # задержка ответа GraphQL, для проверки таймаутов
+        self.workspaces = workspaces if workspaces is not None else [{"id": "ws-1", "name": "Personal"}]
+        self.domain_free = domain_free
+        self.projects = projects or []  # уже существующие проекты (узлы в формате API)
+        self.calls = []        # имена GraphQL-полей и "UPLOAD" в порядке вызова
+        self.variables = {}    # последние переменные по имени поля
+        self.uploads = []      # списки файлов из каждого загруженного архива
+        self.statuses = []
+        self.domain = domain
+        self.service_name = None
+        mock_server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                if self.headers.get("Authorization") != "Bearer " + TOKEN:
+                    return self._send(200, {"errors": [{"message": "Not Authorized"}]})
+                path = urlparse(self.path)
+                if path.path == "/graphql/v2":
+                    time.sleep(mock_server.delay)
+                    return self._send(200, mock_server.graphql(json.loads(body)))
+                m = re.fullmatch(r"/project/([^/]+)/environment/([^/]+)/up", path.path)
+                if m and self.headers.get("Content-Type") == "application/gzip":
+                    service_id = parse_qs(path.query).get("serviceId", [""])[0]
+                    return self._send(200, mock_server.upload(m.group(1), service_id, body))
+                self._send(404, {"message": "not found"})
+
+            def _send(self, code, payload):
+                raw = json.dumps(payload).encode()
+                try:
+                    self.send_response(code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                except ConnectionError:
+                    pass  # клиент уже ушёл по таймауту (тест медленного Railway)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = "http://127.0.0.1:%d" % self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def graphql(self, payload):
+        field = re.search(r"\{\s*(\w+)", payload["query"]).group(1)
+        variables = payload.get("variables") or {}
+        self.calls.append(field)
+        self.variables[field] = variables
+        if field == "me":
+            return {"data": {"me": {"workspaces": self.workspaces}}}
+        if field == "serviceInstance":
+            status = self.live.get(variables["serviceId"])
+            if status is None:
+                return {"errors": [{"message": "ServiceInstance not found"}]}
+            latest = {"id": "dep-live", "status": status, "createdAt": "2026-10-10T12:00:00Z"} if status else None
+            return {"data": {"serviceInstance": {"latestDeployment": latest}}}
+        if field == "projects":
+            return {"data": {"projects": {"edges": [{"node": p} for p in self.projects]}}}
+        if field == "variableCollectionUpsert":
+            return {"data": {"variableCollectionUpsert": True}}
+        if field == "projectCreate":
+            edges = [{"node": {"id": "env-1", "name": "production"}}]
+            return {"data": {"projectCreate": {"id": "proj-1", "environments": {"edges": edges}}}}
+        if field == "serviceCreate":
+            self.service_name = variables["input"]["name"]
+            return {"data": {"serviceCreate": {"id": "svc-1"}}}
+        if field == "serviceDomainCreate":
+            self.domain = "%s-production-a1b2.up.railway.app" % self.service_name
+            return {"data": {"serviceDomainCreate": {"id": "dom-1", "domain": self.domain}}}
+        if field == "serviceDomainAvailable":
+            return {"data": {"serviceDomainAvailable": {"available": self.domain_free}}}
+        if field == "serviceDomainUpdate":
+            self.domain = variables["input"]["domain"]
+            return {"data": {"serviceDomainUpdate": True}}
+        if field == "domains":
+            domains = [{"id": "dom-1", "domain": self.domain}] if self.domain else []
+            return {"data": {"domains": {"serviceDomains": domains}}}
+        if field == "deployment":
+            status = self.statuses.pop(0) if self.statuses else self.final_status
+            return {"data": {"deployment": {"status": status}}}
+        if field in ("buildLogs", "deploymentLogs"):
+            return {"data": {field: [{"message": "ERROR: No matching distribution for flask==99"}]}}
+        return {"errors": [{"message": "unknown field " + field}]}
+
+    def upload(self, project_id, service_id, body):
+        self.calls.append("UPLOAD")
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as tar:
+            self.uploads.append(sorted(tar.getnames()))
+        self.statuses = ["QUEUED", "BUILDING", "DEPLOYING"]
+        n = len(self.uploads)
+        return {"deploymentId": "dep-%d" % n, "url": "", "deploymentDomain": "",
+                "logsUrl": "https://railway.com/project/%s/service/%s?id=dep-%d" % (project_id, service_id, n)}
+
+
+def run(argv, env):
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.dict(os.environ, env, clear=False), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        for var in ("RAILWAY_API_TOKEN", "RAILWAY_TOKEN", "RAILWAY_WORKSPACE_ID"):
+            if var not in env:
+                os.environ.pop(var, None)
+        code = main(argv)
+    return code, out.getvalue(), err.getvalue()
+
+
+def write(root, rel, text="x"):
+    path = Path(root, rel)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+class DeployTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app = self.tmp.name
+        write(self.app, "app.py", "print('hi')\n")
+        write(self.app, "requirements.txt", "flask\n")
+        write(self.app, "lib/util.py")
+        write(self.app, ".gitignore", "secret.txt\nbuild/\n*.log\n!keep.log\n")
+        for junk in ("secret.txt", "build/out.txt", "debug.log", "keep.log",
+                     "node_modules/a.js", "__pycache__/app.pyc", ".git/HEAD"):
+            write(self.app, junk)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def deploy(self, server, *extra, name="Demo App"):
+        env = {"RAILWAY_API_TOKEN": TOKEN, "SMALL_API_URL": server.url}
+        name_args = ["--name", name] if name else []
+        return run(["deploy", self.app, *name_args, "--interval", "0", *extra], env)
+
+    def test_first_deploy_creates_everything_and_prints_url(self):
+        server = MockRailway()
+        self.addCleanup(server.close)
+        code, out, err = self.deploy(server)
+
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip(), "https://demo-app.up.railway.app")
+        self.assertEqual(server.calls, ["me", "projects", "projectCreate", "serviceCreate", "UPLOAD",
+                                        "serviceDomainCreate", "serviceDomainAvailable", "serviceDomainUpdate",
+                                        "domains", "deployment", "deployment", "deployment", "deployment"])
+        self.assertEqual(server.variables["projectCreate"]["input"], {"name": "demo-app", "workspaceId": "ws-1"})
+        self.assertEqual(server.uploads, [["./.gitignore", "./app.py", "./keep.log",
+                                           "./lib/util.py", "./requirements.txt"]])
+        for status in ("QUEUED", "BUILDING", "DEPLOYING", "SUCCESS"):
+            self.assertIn(status, err)
+        state = json.loads(Path(self.app, ".small.json").read_text(encoding="utf-8"))
+        self.assertEqual(state, {"name": "demo-app", "projectId": "proj-1", "environmentId": "env-1",
+                                 "serviceId": "svc-1", "domain": "demo-app.up.railway.app"})
+
+    def test_redeploy_reuses_project_and_domain(self):
+        server = MockRailway()
+        self.addCleanup(server.close)
+        self.assertEqual(self.deploy(server)[0], 0)
+        server.calls.clear()
+
+        code, out, err = self.deploy(server)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip(), "https://demo-app.up.railway.app")
+        self.assertEqual(set(server.calls), {"UPLOAD", "deployment"})
+        self.assertEqual(len(server.uploads), 2)
+
+    def test_keeps_generated_domain_when_name_is_taken(self):
+        server = MockRailway(domain_free=False)
+        self.addCleanup(server.close)
+        code, out, _ = self.deploy(server)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "https://demo-app-production-a1b2.up.railway.app")
+        self.assertNotIn("serviceDomainUpdate", server.calls)
+
+    def test_failed_build_prints_logs_and_exits_1(self):
+        server = MockRailway(final_status="FAILED")
+        self.addCleanup(server.close)
+        code, out, err = self.deploy(server)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("No matching distribution", err)
+        self.assertIn("FAILED", err)
+        self.assertIn("buildLogs", server.calls)
+
+    def test_crash_shows_runtime_logs(self):
+        server = MockRailway(final_status="CRASHED")
+        self.addCleanup(server.close)
+        code, _, _ = self.deploy(server)
+        self.assertEqual(code, 1)
+        self.assertIn("deploymentLogs", server.calls)
+
+    def test_no_wait_prints_url_without_polling(self):
+        server = MockRailway()
+        self.addCleanup(server.close)
+        code, out, _ = self.deploy(server, "--no-wait")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "https://demo-app.up.railway.app")
+        self.assertNotIn("deployment", server.calls)
+
+    def test_multiple_workspaces_require_choice(self):
+        server = MockRailway(workspaces=[{"id": "ws-1", "name": "Personal"}, {"id": "ws-2", "name": "Team"}])
+        self.addCleanup(server.close)
+        code, _, err = self.deploy(server)
+        self.assertEqual(code, 1)
+        self.assertIn("--workspace", err)
+        self.assertIn("ws-2", err)
+        self.assertNotIn("projectCreate", server.calls)
+
+        code, _, _ = self.deploy(server, "--workspace", "ws-2")
+        self.assertEqual(code, 0)
+        self.assertEqual(server.variables["projectCreate"]["input"]["workspaceId"], "ws-2")
+
+    def test_missing_token(self):
+        code, _, err = run(["deploy", self.app], {})
+        self.assertEqual(code, 1)
+        self.assertIn("RAILWAY_API_TOKEN", err)
+
+    def test_bad_token(self):
+        server = MockRailway()
+        self.addCleanup(server.close)
+        code, _, err = run(["deploy", self.app, "--interval", "0"],
+                           {"RAILWAY_API_TOKEN": "wrong", "SMALL_API_URL": server.url})
+        self.assertEqual(code, 1)
+        self.assertIn("Not Authorized", err)
+        self.assertFalse(Path(self.app, ".small.json").exists())
+
+
+def project_node(project_id, name, services=("svc-old",), deleted=False):
+    return {"id": project_id, "name": name, "deletedAt": "2026-01-01T00:00:00Z" if deleted else None,
+            "environments": {"edges": [{"node": {"id": "env-staging", "name": "staging"}},
+                                       {"node": {"id": "env-old", "name": "production"}}]},
+            "services": {"edges": [{"node": {"id": sid, "name": name if i == 0 else "worker"}}
+                                   for i, sid in enumerate(services)]}}
+
+
+class ConfigFileTest(unittest.TestCase):
+    """small.json: имя проекта/сервиса и переменные окружения."""
+
+    CONFIG = {"name": "my-custom-app-name",
+              "env": {"OPENAI_API_KEY": "sk-test-123", "DEBUG": True, "WORKERS": 2}}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+        write(self.app, "app.py", "print('hi')\n")
+        write(self.app, "conf/small.json", "{}")  # не корневой small.json — обычный файл приложения
+
+    def write_config(self, config, raw=None):
+        # utf-8-sig: так сохраняет Блокнот Windows, BOM не должен мешать.
+        Path(self.app, "small.json").write_text(raw if raw is not None else json.dumps(config), encoding="utf-8-sig")
+
+    def deploy(self, server, *extra):
+        return run(["deploy", self.app, "--interval", "0", *extra],
+                   {"RAILWAY_API_TOKEN": TOKEN, "SMALL_API_URL": server.url})
+
+    def server(self, **kwargs):
+        server = MockRailway(**kwargs)
+        self.addCleanup(server.close)
+        return server
+
+    def state(self):
+        return json.loads(Path(self.app, ".small.json").read_text(encoding="utf-8"))
+
+    def test_name_and_env_are_applied_before_upload(self):
+        self.write_config(self.CONFIG)
+        server = self.server()
+        code, out, err = self.deploy(server)
+
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip(), "https://my-custom-app-name.up.railway.app")
+        self.assertEqual(server.variables["projectCreate"]["input"]["name"], "my-custom-app-name")
+        self.assertEqual(server.variables["serviceCreate"]["input"]["name"], "my-custom-app-name")
+        self.assertEqual(server.variables["variableCollectionUpsert"]["input"], {
+            "projectId": "proj-1", "environmentId": "env-1", "serviceId": "svc-1",
+            "variables": {"OPENAI_API_KEY": "sk-test-123", "DEBUG": "true", "WORKERS": "2"},
+            "replace": False, "skipDeploys": True,
+        })
+        self.assertLess(server.calls.index("variableCollectionUpsert"), server.calls.index("UPLOAD"))
+        # Корневой small.json с секретами не уходит в Railway, вложенный conf/small.json — уходит.
+        self.assertEqual(server.uploads, [["./app.py", "./conf/small.json"]])
+        self.assertIn("DEBUG, OPENAI_API_KEY, WORKERS", err)
+        self.assertNotIn("sk-test-123", err + out)
+
+    def test_redeploy_updates_env_without_new_project(self):
+        self.write_config(self.CONFIG)
+        server = self.server()
+        self.assertEqual(self.deploy(server)[0], 0)
+        server.calls.clear()
+
+        self.write_config({"name": "my-custom-app-name", "env": {"DEBUG": "false"}})
+        code, _, err = self.deploy(server)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("projects", server.calls)
+        self.assertNotIn("projectCreate", server.calls)
+        self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"], {"DEBUG": "false"})
+        self.assertLess(server.calls.index("variableCollectionUpsert"), server.calls.index("UPLOAD"))
+
+    def test_binds_to_existing_project_with_same_name(self):
+        self.write_config(self.CONFIG)
+        server = self.server(
+            projects=[project_node("proj-other", "other-app"),
+                      project_node("proj-deleted", "my-custom-app-name", deleted=True),
+                      project_node("proj-old", "my-custom-app-name", services=("svc-old", "svc-worker"))],
+            domain="my-custom-app-name-production-zz.up.railway.app")
+        code, out, err = self.deploy(server)
+
+        self.assertEqual(code, 0, err)
+        self.assertIn("Найден проект my-custom-app-name", err)
+        for call in ("projectCreate", "serviceCreate", "serviceDomainCreate"):
+            self.assertNotIn(call, server.calls)
+        self.assertEqual(self.state(), {
+            "name": "my-custom-app-name", "projectId": "proj-old", "environmentId": "env-old",
+            "serviceId": "svc-old", "domain": "my-custom-app-name-production-zz.up.railway.app"})
+        self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["serviceId"], "svc-old")
+        self.assertEqual(out.strip(), "https://my-custom-app-name-production-zz.up.railway.app")
+
+    def test_ambiguous_project_name_is_an_error(self):
+        self.write_config(self.CONFIG)
+        server = self.server(projects=[project_node("proj-a", "my-custom-app-name"),
+                                       project_node("proj-b", "my-custom-app-name")])
+        code, _, err = self.deploy(server)
+        self.assertEqual(code, 1)
+        self.assertIn("несколько проектов", err)
+        self.assertNotIn("UPLOAD", server.calls)
+
+    def test_new_flag_creates_project_even_if_name_exists(self):
+        self.write_config(self.CONFIG)
+        server = self.server(projects=[project_node("proj-old", "my-custom-app-name")])
+        code, _, err = self.deploy(server, "--new")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("projects", server.calls)
+        self.assertEqual(self.state()["projectId"], "proj-1")
+
+    def test_cli_name_overrides_config(self):
+        self.write_config({"name": "from-config"})
+        server = self.server()
+        code, _, _ = self.deploy(server, "--name", "From Flag")
+        self.assertEqual(code, 0)
+        self.assertEqual(server.variables["projectCreate"]["input"]["name"], "from-flag")
+        self.assertNotIn("variableCollectionUpsert", server.calls)  # env не задан — переменные не трогаем
+
+    def test_config_name_ignored_for_already_linked_folder(self):
+        server = self.server()
+        self.assertEqual(self.deploy(server)[0], 0)  # без small.json: имя из папки
+        linked = self.state()
+        self.write_config({"name": "renamed-app"})
+        server.calls.clear()
+
+        code, _, err = self.deploy(server)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.state(), linked)
+        self.assertNotIn("projectCreate", server.calls)
+        self.assertIn("renamed-app не применено", err)
+
+    def test_invalid_config_is_rejected_before_any_api_call(self):
+        cases = {
+            "{не json": "некорректный JSON",
+            '["x"]': "ожидается объект",
+            '{"nmae": "x"}': "неизвестные поля nmae",
+            '{"name": ""}': "name должен быть непустой строкой",
+            '{"env": ["A=1"]}': "env должен быть объектом",
+            '{"env": {"1BAD": "x"}}': "недопустимое имя переменной '1BAD'",
+            '{"env": {"KEY": null}}': "значение KEY должно быть строкой",
+        }
+        server = self.server()
+        for raw, message in cases.items():
+            self.write_config(None, raw=raw)
+            code, _, err = self.deploy(server)
+            self.assertEqual(code, 1, raw)
+            self.assertIn(message, err, raw)
+        self.assertEqual(server.calls, [])
+
+
+MAGIC_LINK_DIR = Path(__file__).resolve().parents[2] / "magic-link"  # исходники middleware
+
+
+def http_get(port, path, cookie=None):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", path, headers={"Cookie": cookie} if cookie else {})
+    res = conn.getresponse()
+    body = res.read().decode("utf-8", "replace")
+    conn.close()
+    return res.status, res, body
+
+
+class InitTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = os.path.join(self.tmp.name, "My Cool App")
+
+    def init(self, *args, path=None):
+        return run(["init", path or self.app, *args], {})
+
+    def read(self, rel):
+        return Path(self.app, rel).read_text(encoding="utf-8")
+
+    def config(self):
+        return load_config(Path(self.app, "small.json"))  # тот же парсер, что у small deploy
+
+    def test_default_template_creates_project(self):
+        code, out, err = self.init()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out, "")
+        self.assertEqual(sorted(os.listdir(self.app)),
+                         [".gitignore", ".railwayignore", "app.py", "magic_link.py", "small.json"])
+        config = self.config()
+        self.assertRegex(config["name"], r"^my-cool-app-[0-9a-f]{4}$")
+        self.assertEqual(list(config["env"]), ["ACCESS_TOKEN"])
+        self.assertGreaterEqual(len(config["env"]["ACCESS_TOKEN"]), 40)
+        gitignore = self.read(".gitignore").splitlines()
+        for line in ("small.json", ".small.json", ".env", "__pycache__/"):
+            self.assertIn(line, gitignore)
+        self.assertIn("*.md", self.read(".railwayignore").splitlines())
+        self.assertIn("small deploy", err)
+        self.assertNotIn(config["env"]["ACCESS_TOKEN"], err)  # токен не печатается
+
+    def test_names_and_tokens_are_unique(self):
+        other = os.path.join(self.tmp.name, "other")
+        self.assertEqual(self.init()[0], 0)
+        self.assertEqual(self.init(path=other)[0], 0)
+        first, second = self.config(), load_config(Path(other, "small.json"))
+        self.assertNotEqual(first["env"]["ACCESS_TOKEN"], second["env"]["ACCESS_TOKEN"])
+        self.assertTrue(second["name"].startswith("other-"))
+
+    def test_explicit_name(self):
+        self.assertEqual(self.init("--name", "Billing API")[0], 0)
+        self.assertEqual(self.config()["name"], "billing-api")
+
+    def test_node_template(self):
+        code, _, err = self.init("--template", "node-http")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(os.listdir(self.app)),
+                         [".gitignore", ".railwayignore", "magic-link.js", "package.json", "server.js", "small.json"])
+        self.assertEqual(json.loads(self.read("package.json"))["scripts"]["start"], "node server.js")
+        self.assertIn("node_modules/", self.read(".gitignore").splitlines())
+
+    def test_unknown_template_is_rejected(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as exit_:
+            main(["init", self.app, "--template", "ruby"])
+        self.assertEqual(exit_.exception.code, 2)
+        self.assertIn("python-http", err.getvalue())
+        self.assertFalse(os.path.exists(self.app))
+
+    def test_existing_files_are_not_overwritten(self):
+        write(self.app, "app.py", "my code\n")
+        write(self.app, "small.json", '{"name": "mine"}')
+        code, _, err = self.init()
+        self.assertEqual(code, 1)
+        self.assertIn("app.py, small.json", err)
+        self.assertIn("--force", err)
+        self.assertEqual(self.read("app.py"), "my code\n")
+        self.assertEqual(sorted(os.listdir(self.app)), ["app.py", "small.json"])  # ничего не дописано
+
+    def test_force_overwrites(self):
+        write(self.app, "app.py", "my code\n")
+        code, _, err = self.init("--force")
+        self.assertEqual(code, 0, err)
+        self.assertIn("MagicLink(app)", self.read("app.py"))
+        self.assertRegex(err, r"app\.py\s+перезаписан")
+
+    def test_interactive_confirmation(self):
+        write(self.app, "app.py", "my code\n")
+        for answer, expected_code, expected_content in (("n", 1, "my code\n"), ("да", 0, None)):
+            with mock.patch.object(sys, "stdin") as stdin, mock.patch("builtins.input", return_value=answer):
+                stdin.isatty.return_value = True
+                code, _, err = self.init()
+            self.assertEqual(code, expected_code, answer)
+            self.assertIn("Перезаписать? [y/N]", err)
+            if expected_content:
+                self.assertEqual(self.read("app.py"), expected_content)
+            else:
+                self.assertIn("MagicLink(app)", self.read("app.py"))
+
+    def test_existing_ignore_files_are_merged(self):
+        write(self.app, ".gitignore", "dist/\n.env")
+        code, _, err = self.init()
+        self.assertEqual(code, 0, err)
+        lines = self.read(".gitignore").splitlines()
+        self.assertEqual(lines[:2], ["dist/", ".env"])           # строки пользователя на месте
+        self.assertEqual(lines.count(".env"), 1)                 # без дублей
+        self.assertIn("small.json", lines)
+        self.assertRegex(err, r"\.gitignore\s+дополнен")
+
+        os.remove(os.path.join(self.app, "app.py"))
+        before = self.read(".gitignore")
+        self.assertEqual(self.init("--force")[0], 0)
+        self.assertEqual(self.read(".gitignore"), before)         # повторный init ничего не дублирует
+
+    def test_init_then_deploy(self):
+        self.assertEqual(self.init()[0], 0)
+        config = self.config()
+        server = MockRailway()
+        self.addCleanup(server.close)
+        code, out, err = run(["deploy", self.app, "--interval", "0"],
+                             {"RAILWAY_API_TOKEN": TOKEN, "SMALL_API_URL": server.url})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip(), "https://%s.up.railway.app" % config["name"])
+        self.assertEqual(server.variables["projectCreate"]["input"]["name"], config["name"])
+        self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"], config["env"])
+        self.assertEqual(server.uploads, [["./.gitignore", "./.railwayignore", "./app.py", "./magic_link.py"]])
+
+    def check_running_app(self, command, token):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        env = dict(os.environ, PORT=str(port), HOST="127.0.0.1", ACCESS_TOKEN=token)
+        proc = subprocess.Popen(command, cwd=self.app, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        for _ in range(100):
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                break
+            except OSError:
+                time.sleep(0.1)
+        status, _, body = http_get(port, "/")
+        self.assertEqual(status, 403)
+        self.assertIn("Запросить доступ", body)
+        status, res, _ = http_get(port, "/?token=" + token)
+        self.assertEqual((status, res.getheader("Location")), (302, "/"))
+        status, _, body = http_get(port, "/", cookie=res.getheader("Set-Cookie").split(";")[0])
+        self.assertEqual(status, 200)
+        self.assertIn("Работает!", body)
+
+    def test_python_template_runs(self):
+        self.assertEqual(self.init()[0], 0)
+        self.check_running_app([sys.executable, "app.py"], self.config()["env"]["ACCESS_TOKEN"])
+
+    @unittest.skipUnless(shutil.which("node"), "node не установлен")
+    def test_node_template_runs(self):
+        self.assertEqual(self.init("--template", "node-http")[0], 0)
+        self.check_running_app(["node", "server.js"], self.config()["env"]["ACCESS_TOKEN"])
+
+    @unittest.skipUnless(MAGIC_LINK_DIR.is_dir(), "нет папки magic-link с исходниками middleware")
+    def test_template_middleware_matches_source(self):
+        for template, name in (("python-http", "magic_link.py"), ("node-http", "magic-link.js")):
+            self.assertEqual((TEMPLATES_DIR / template / name).read_bytes(), (MAGIC_LINK_DIR / name).read_bytes(),
+                             "%s в шаблоне %s разошёлся с magic-link/%s" % (name, template, name))
+
+
+SECRET = "super-secret-token-value"
+
+
+class DashboardTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+        files = {
+            "apps/billing/small.json": {"name": "billing", "env": {"DEBUG": "true", "ACCESS_TOKEN": SECRET}},
+            "apps/billing/.small.json": {"name": "billing", "projectId": "proj-1", "environmentId": "env-1",
+                                         "serviceId": "svc-1", "domain": "billing-x1.up.railway.app"},
+            "apps/billing/conf/small.json": {},          # внутри приложения — не отдельное приложение
+            "fresh/small.json": {"name": "fresh-app"},
+            "legacy/.small.json": {"name": "legacy", "projectId": "proj-2", "environmentId": "env-2",
+                                   "serviceId": "svc-2"},
+            "unnamed/small.json": {},
+            "evil/.small.json": {"projectId": "../x", "serviceId": "svc-3", "domain": "javascript:alert(1)"},
+            "node_modules/pkg/small.json": {},           # служебные папки не сканируются
+        }
+        for rel, data in files.items():
+            write(self.root, rel, json.dumps(data))
+        write(self.root, "broken/small.json", "{oops")
+        write(self.root, "plain/app.py", "")              # без small.json — не приложение
+
+    def apps(self, **kwargs):
+        return {a["relPath"]: a for a in scan_apps(self.root, **kwargs)}
+
+    def test_scan_finds_apps_and_describes_them(self):
+        apps = self.apps()
+        self.assertEqual(list(apps), ["apps/billing", "broken", "evil", "fresh", "legacy", "unnamed"])
+        self.assertEqual(apps["apps/billing"], {
+            "name": "billing", "path": str(Path(self.root, "apps", "billing").resolve()), "relPath": "apps/billing",
+            "status": "linked", "url": "https://billing-x1.up.railway.app",
+            "railwayUrl": "https://railway.com/project/proj-1/service/svc-1",
+            "envNames": ["ACCESS_TOKEN", "DEBUG"], "errors": [],
+            "serviceId": "svc-1", "environmentId": "env-1", "deployment": None})
+        self.assertEqual((apps["fresh"]["name"], apps["fresh"]["status"], apps["fresh"]["url"]),
+                         ("fresh-app", "not_deployed", None))
+        self.assertEqual((apps["legacy"]["name"], apps["legacy"]["status"], apps["legacy"]["url"]),
+                         ("legacy", "linked", None))
+        self.assertEqual(apps["legacy"]["railwayUrl"], "https://railway.com/project/proj-2/service/svc-2")
+        self.assertEqual(apps["unnamed"]["name"], "unnamed")  # имя папки, если имени нигде нет
+
+    def test_scan_never_exposes_env_values(self):
+        self.assertNotIn(SECRET, json.dumps(scan_apps(self.root)))
+
+    def test_scan_reports_broken_files_and_rejects_unsafe_links(self):
+        apps = self.apps()
+        self.assertEqual(apps["broken"]["status"], "not_deployed")
+        self.assertIn("некорректный JSON", apps["broken"]["errors"][0])
+        self.assertEqual((apps["evil"]["url"], apps["evil"]["railwayUrl"]), (None, None))
+        self.assertIn("некорректный домен", apps["evil"]["errors"][0])
+
+    def test_scan_depth_limit_and_root_app(self):
+        write(self.root, "a/b/c/deep/small.json", "{}")
+        self.assertNotIn("a/b/c/deep", self.apps(max_depth=3))
+        self.assertIn("a/b/c/deep", self.apps(max_depth=4))
+        root_app = scan_apps(Path(self.root, "apps", "billing"))
+        self.assertEqual([(a["relPath"], a["name"]) for a in root_app], [(".", "billing")])
+
+    def serve(self):
+        server = start_server(self.root, port=0)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def test_http_page_and_api(self):
+        port = self.serve()
+        status, res, body = http_get(port, "/")
+        self.assertEqual(status, 200)
+        self.assertEqual(res.getheader("Content-Type"), "text/html; charset=utf-8")
+        self.assertIn('<script src="https://cdn.tailwindcss.com/3.4.17"></script>', body)
+        self.assertIn('id="refresh"', body)
+
+        status, res, body = http_get(port, "/api/apps")
+        self.assertEqual(status, 200)
+        self.assertEqual(res.getheader("Content-Type"), "application/json; charset=utf-8")
+        data = json.loads(body)
+        self.assertEqual(data["root"], str(Path(self.root).resolve()))
+        self.assertEqual(len(data["apps"]), 6)
+        self.assertNotIn(SECRET, body)
+
+        write(self.root, "added-later/small.json", '{"name": "added-later"}')  # кнопка «Обновить» = новый запрос
+        names = [a["name"] for a in json.loads(http_get(port, "/api/apps")[2])["apps"]]
+        self.assertIn("added-later", names)
+        self.assertEqual(http_get(port, "/nope")[0], 404)
+
+    def test_foreign_host_is_rejected(self):
+        port = self.serve()
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/api/apps", headers={"Host": "evil.example:%d" % port})
+        res = conn.getresponse()
+        self.assertEqual(res.status, 403)
+        self.assertNotIn(b"billing", res.read())
+        conn.close()
+        self.assertEqual(http_get(port, "/api/apps")[0], 200)
+
+    def test_busy_port_falls_back_to_free_one(self):
+        with socket.socket() as busy:
+            busy.bind(("127.0.0.1", 0))
+            busy.listen(1)
+            taken = busy.getsockname()[1]
+            server = start_server(self.root, port=taken)
+            self.addCleanup(server.server_close)
+            self.assertNotEqual(server.server_address[1], taken)
+
+    def test_command_prints_url_and_opens_browser(self):
+        for extra, browser_opened in (([], True), (["--no-browser"], False)):
+            with mock.patch("webbrowser.open") as open_browser, \
+                    mock.patch.object(DashboardServer, "serve_forever", side_effect=KeyboardInterrupt):
+                code, out, err = run(["dashboard", self.root, "--port", "0", *extra], {})
+            self.assertEqual(code, 0, err)
+            url = out.strip()
+            self.assertRegex(url, r"^http://127\.0\.0\.1:\d+/$")
+            self.assertEqual(open_browser.called, browser_opened)
+            if browser_opened:
+                open_browser.assert_called_once_with(url)
+            self.assertIn("приложений найдено: 6", err)
+            self.assertIn("Статусы деплоя из Railway: выключены", err)
+            self.assertIn("Дашборд остановлен", err)
+
+    def test_missing_folder(self):
+        code, _, err = run(["dashboard", os.path.join(self.root, "nope"), "--no-browser"], {})
+        self.assertEqual(code, 1)
+        self.assertIn("папка не найдена", err)
+
+
+def closed_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class DashboardLiveStatusTest(unittest.TestCase):
+    """Живой статус деплоя из Railway в дашборде (Railway — локальный мок)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+        for name, service in (("billing", "svc-1"), ("worker", "svc-2"), ("empty", "svc-3")):
+            write(self.root, name + "/.small.json", json.dumps({
+                "name": name, "projectId": "proj-1", "environmentId": "env-1", "serviceId": service}))
+        write(self.root, "fresh/small.json", '{"name": "fresh"}')  # не привязан — в Railway не спрашиваем
+
+    def railway(self, **kwargs):
+        server = MockRailway(**kwargs)
+        self.addCleanup(server.close)
+        patcher = mock.patch.dict(os.environ, {"SMALL_API_URL": server.url})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return server
+
+    def live(self, token=TOKEN, timeout=5):
+        apps = scan_apps(self.root)
+        mode = add_live_status(apps, token, timeout=timeout)
+        return mode, {a["relPath"]: a["deployment"] for a in apps}
+
+    def test_statuses_from_railway(self):
+        server = self.railway(live={"svc-1": "SUCCESS", "svc-2": "BUILDING", "svc-3": ""})
+        mode, deployments = self.live()
+        self.assertEqual(mode, "on")
+        self.assertEqual(deployments, {
+            "billing": {"status": "SUCCESS", "createdAt": "2026-10-10T12:00:00Z"},
+            "worker": {"status": "BUILDING", "createdAt": "2026-10-10T12:00:00Z"},
+            "empty": None,   # деплоев ещё не было
+            "fresh": None,
+        })
+        self.assertEqual(sorted(server.calls), ["serviceInstance"] * 3)
+
+    def test_no_token_means_offline_without_requests(self):
+        server = self.railway(live={"svc-1": "SUCCESS"})
+        mode, deployments = self.live(token=None)
+        self.assertEqual(mode, "off")
+        self.assertEqual(set(deployments.values()), {None})
+        self.assertEqual(server.calls, [])
+
+    def test_one_failing_service_does_not_hide_others(self):
+        self.railway(live={"svc-1": "FAILED"})  # svc-2, svc-3 — «не найдены»
+        mode, deployments = self.live()
+        self.assertEqual(mode, "on")
+        self.assertEqual(deployments["billing"]["status"], "FAILED")
+        self.assertIsNone(deployments["worker"])
+
+    def test_network_error_falls_back_to_offline(self):
+        with mock.patch.dict(os.environ, {"SMALL_API_URL": "http://127.0.0.1:%d" % closed_port()}):
+            mode, deployments = self.live(timeout=2)
+        self.assertEqual(mode, "error")
+        self.assertEqual(set(deployments.values()), {None})
+
+    def test_slow_railway_hits_timeout(self):
+        self.railway(live={"svc-1": "SUCCESS", "svc-2": "SUCCESS", "svc-3": "SUCCESS"}, delay=3)
+        started = time.monotonic()
+        mode, deployments = self.live(timeout=0.5)
+        self.assertLess(time.monotonic() - started, 2.5)  # запросы идут параллельно и не ждут ответа
+        self.assertEqual(mode, "error")
+        self.assertEqual(set(deployments.values()), {None})
+
+    def test_rejected_token_falls_back(self):
+        self.railway(live={"svc-1": "SUCCESS"})
+        mode, deployments = self.live(token="wrong-token")
+        self.assertEqual(mode, "error")
+        self.assertEqual(set(deployments.values()), {None})
+
+    def test_unexpected_status_is_ignored(self):
+        self.railway(live={"svc-1": "<b>pwned</b>", "svc-2": "SUCCESS", "svc-3": ""})
+        _, deployments = self.live()
+        self.assertIsNone(deployments["billing"])
+        self.assertEqual(deployments["worker"]["status"], "SUCCESS")
+
+    def serve(self, token):
+        server = start_server(self.root, port=0, token=token)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def test_api_returns_live_status_but_never_the_token(self):
+        self.railway(live={"svc-1": "SUCCESS", "svc-2": "CRASHED", "svc-3": ""})
+        status, _, body = http_get(self.serve(TOKEN), "/api/apps")
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["live"], "on")
+        statuses = {a["relPath"]: (a["deployment"] or {}).get("status") for a in data["apps"]}
+        self.assertEqual(statuses, {"billing": "SUCCESS", "empty": None, "fresh": None, "worker": "CRASHED"})
+        self.assertNotIn(TOKEN, body)
+
+    def test_api_survives_railway_outage(self):
+        with mock.patch.dict(os.environ, {"SMALL_API_URL": "http://127.0.0.1:%d" % closed_port()}):
+            status, _, body = http_get(self.serve(TOKEN), "/api/apps")
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["live"], "error")
+        self.assertEqual(len(data["apps"]), 4)
+
+    def test_command_reports_live_mode(self):
+        with mock.patch("webbrowser.open"), \
+                mock.patch.object(DashboardServer, "serve_forever", side_effect=KeyboardInterrupt):
+            code, _, err = run(["dashboard", self.root, "--port", "0", "--no-browser"], {"RAILWAY_API_TOKEN": TOKEN})
+        self.assertEqual(code, 0, err)
+        self.assertIn("Статусы деплоя из Railway: включены", err)
+
+
+HAS_STREAMLIT = importlib.util.find_spec("streamlit") is not None
+
+
+class StreamlitTemplateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = os.path.join(self.tmp.name, "dash")
+        code, _, err = run(["init", self.app, "--template", "streamlit"], {})
+        self.assertEqual(code, 0, err)
+        self.token = load_config(Path(self.app, "small.json"))["env"]["ACCESS_TOKEN"]
+
+    def test_files(self):
+        self.assertEqual(sorted(os.listdir(self.app)),
+                         [".gitignore", ".railwayignore", "app.py", "requirements.txt", "small.json"])
+        self.assertRegex(Path(self.app, "requirements.txt").read_text(encoding="utf-8"), r"(?m)^streamlit\b")
+        source = Path(self.app, "app.py").read_text(encoding="utf-8")
+        compile(source, "app.py", "exec")
+        self.assertIn("require_access()", source)
+        gitignore = Path(self.app, ".gitignore").read_text(encoding="utf-8").splitlines()
+        for line in ("small.json", ".small.json", "__pycache__/", ".streamlit/secrets.toml"):
+            self.assertIn(line, gitignore)
+        self.assertGreaterEqual(len(self.token), 40)
+
+    def test_deploy_uploads_app_without_secrets(self):
+        server = MockRailway()
+        self.addCleanup(server.close)
+        code, _, err = run(["deploy", self.app, "--interval", "0"],
+                           {"RAILWAY_API_TOKEN": TOKEN, "SMALL_API_URL": server.url})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(server.uploads, [["./.gitignore", "./.railwayignore", "./app.py", "./requirements.txt"]])
+        self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"], {"ACCESS_TOKEN": self.token})
+
+    def test_help_lists_all_templates(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as exit_:
+            main(["init", "--help"])
+        self.assertEqual(exit_.exception.code, 0)
+        for template in ("python-http", "node-http", "streamlit"):
+            self.assertIn(template, out.getvalue())
+
+    # --- ниже — на настоящем Streamlit (нужен `pip install streamlit`) ---
+
+    def app_test(self, token=None, env=None):
+        from streamlit.testing.v1 import AppTest
+        at = AppTest.from_file(os.path.join(self.app, "app.py"), default_timeout=30)
+        if token is not None:
+            at.query_params["token"] = token
+        with mock.patch.dict(os.environ, dict({"ACCESS_TOKEN": self.token}, **(env or {}))):
+            at.run()
+        return at
+
+    @unittest.skipUnless(HAS_STREAMLIT, "streamlit не установлен")
+    def test_streamlit_gate_without_token(self):
+        at = self.app_test()
+        self.assertFalse(at.exception)
+        self.assertIn("Доступ по приглашению", at.markdown[0].value)
+        self.assertEqual([b.label for b in at.button], ["Запросить доступ"])
+        self.assertEqual(len(at.title), 0)  # интерфейс приложения не показан
+
+    @unittest.skipUnless(HAS_STREAMLIT, "streamlit не установлен")
+    def test_streamlit_gate_with_wrong_token(self):
+        at = self.app_test(token="wrong")
+        self.assertIn("Ссылка недействительна", at.markdown[0].value)
+        self.assertEqual(len(at.title), 0)
+
+    @unittest.skipUnless(HAS_STREAMLIT, "streamlit не установлен")
+    def test_streamlit_app_with_valid_token(self):
+        at = self.app_test(token=self.token)
+        self.assertFalse(at.exception)
+        self.assertEqual(at.title[0].value, "🚀 small + Streamlit")
+        self.assertEqual([m.label for m in at.metric], ["Альфа", "Бета", "Гамма"])
+        at.sidebar.slider[0].set_value(300).run()  # интерактивность: перерисовка с другими параметрами
+        self.assertFalse(at.exception)
+
+    @unittest.skipUnless(HAS_STREAMLIT, "streamlit не установлен")
+    def test_streamlit_access_request_is_logged(self):
+        at = self.app_test()
+        at.text_input[0].input("me@example.com\n[access-request] fake")  # попытка подделать строку лога
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, {"ACCESS_TOKEN": self.token}):
+            at.button[0].click().run()
+        self.assertIn("Запрос отправлен", at.success[0].value)
+        self.assertIn("[access-request] contact='me@example.com\\n[access-request] fake'", out.getvalue())
+        self.assertEqual(out.getvalue().count("\n"), 1)  # одна строка лога, перевод строки экранирован
+
+    @unittest.skipUnless(HAS_STREAMLIT, "streamlit не установлен")
+    def test_python_app_py_starts_streamlit_server(self):
+        # Так приложение запускает Railway: `python app.py` должен поднять сервер Streamlit на $PORT.
+        port = closed_port()
+        env = dict(os.environ, PORT=str(port), HOST="127.0.0.1", ACCESS_TOKEN=self.token)
+        proc = subprocess.Popen([sys.executable, "app.py"], cwd=self.app, env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        for _ in range(150):
+            try:
+                if http_get(port, "/_stcore/health")[0] == 200:
+                    break
+            except OSError:
+                time.sleep(0.2)
+        status, _, body = http_get(port, "/_stcore/health")
+        self.assertEqual((status, body), (200, "ok"))
+
+
+class LauncherTest(unittest.TestCase):
+    def test_small_cmd_is_ascii_with_crlf(self):
+        # cmd.exe разбирает UTF-8 и LF-переводы строк в .cmd с ошибками: обрывки строк исполняются как команды.
+        data = (Path(__file__).resolve().parents[1] / "small.cmd").read_bytes()
+        self.assertTrue(all(b < 128 for b in data), "small.cmd должен быть только ASCII")
+        self.assertEqual(data.count(b"\n"), data.count(b"\r\n"), "small.cmd должен быть с переводами строк CRLF")
+
+
+class IgnoreRulesTest(unittest.TestCase):
+    def check(self, lines, path, is_dir=False):
+        return IgnoreRules(lines).ignored(path, is_dir)
+
+    def test_patterns(self):
+        self.assertTrue(self.check(["*.log"], "a/b/debug.log"))
+        self.assertTrue(self.check(["/build"], "build", is_dir=True))
+        self.assertFalse(self.check(["/build"], "src/build", is_dir=True))
+        self.assertTrue(self.check(["build/"], "src/build", is_dir=True))
+        self.assertFalse(self.check(["build/"], "build"))
+        self.assertTrue(self.check(["docs/*.md"], "docs/a.md"))
+        self.assertFalse(self.check(["docs/*.md"], "docs/sub/a.md"))
+        self.assertTrue(self.check(["docs/**/*.md"], "docs/sub/a.md"))
+        self.assertTrue(self.check(["**/tmp"], "x/y/tmp", is_dir=True))
+        self.assertFalse(self.check(["*.log", "!keep.log"], "keep.log"))
+        self.assertTrue(self.check(["# comment", "", ".env"], ".env"))
+        self.assertTrue(self.check(["file[0-9].txt"], "file7.txt"))
+
+
+if __name__ == "__main__":
+    unittest.main()

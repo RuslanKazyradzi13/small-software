@@ -1,0 +1,17 @@
+# Секреты и локальное состояние small: ACCESS_TOKEN, ключи из env, ID проектов на этой машине
+small.json
+.small.json
+.env
+
+# Временные файлы Office
+~$*
+
+# Python / Node
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+node_modules/
