@@ -5,6 +5,9 @@ small.json с уникальным именем и ACCESS_TOKEN, .gitignore и .
 
 `small dashboard` поднимает локальную страницу со списком приложений в папке (см. dashboard.py).
 
+`small link` / `small open` — ссылка-приглашение задеплоенного приложения, `small logs` — его логи,
+`small destroy` — удалить его из Railway.
+
 Ход `small deploy`: прочитать small.json -> упаковать код -> найти проект по имени или создать его
 (projectCreate + serviceCreate) -> записать переменные из small.json (variableCollectionUpsert)
 -> загрузить архив (POST .../up) -> serviceDomainCreate -> опрашивать deployment(id).status
@@ -21,7 +24,9 @@ import secrets
 import sys
 import time
 import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from . import __version__, dashboard, scaffold
 from .archive import collect_files, make_tarball
@@ -93,7 +98,162 @@ def build_parser():
                    help="порт (по умолчанию %d; если занят — любой свободный)" % dashboard.DEFAULT_PORT)
     b.add_argument("--no-browser", action="store_true", help="не открывать браузер")
     b.set_defaults(func=cmd_dashboard)
+
+    for name, opens, text in (("link", False, "напечатать ссылку-приглашение задеплоенного приложения"),
+                              ("open", True, "открыть задеплоенное приложение по ссылке-приглашению")):
+        k = sub.add_parser(name, help=text, description=text.capitalize() + ". ACCESS_TOKEN берётся из %s, "
+                           "а если его там нет — из переменных сервиса в Railway (нужен RAILWAY_API_TOKEN)."
+                           % CONFIG_FILE)
+        k.add_argument("path", nargs="?", default=".", help="папка приложения (по умолчанию текущая)")
+        k.set_defaults(func=cmd_link, open=opens)
+
+    g = sub.add_parser("logs", help="логи приложения из Railway",
+                       description="Показать лог последнего деплоя: приложения (по умолчанию) или сборки.")
+    g.add_argument("path", nargs="?", default=".", help="папка приложения (по умолчанию текущая)")
+    g.add_argument("--build", action="store_true", help="лог сборки вместо лога приложения")
+    g.add_argument("-n", "--lines", type=int, default=100, help="сколько строк (по умолчанию 100)")
+    g.add_argument("-f", "--follow", action="store_true", help="следить за новыми строками (Ctrl+C — выход)")
+    g.add_argument("--interval", type=float, default=2.0, help=argparse.SUPPRESS)
+    g.set_defaults(func=cmd_logs)
+
+    x = sub.add_parser("destroy", help="удалить приложение из Railway",
+                       description="Удалить приложение из Railway: проект целиком, если в нём только этот сервис, "
+                                   "иначе только сервис. Затем удаляется %s; %s остаётся." % (STATE_FILE, CONFIG_FILE))
+    x.add_argument("path", nargs="?", default=".", help="папка приложения (по умолчанию текущая)")
+    x.add_argument("--yes", action="store_true", help="не спрашивать подтверждение (для скриптов)")
+    x.set_defaults(func=cmd_destroy)
     return parser
+
+
+def app_dir(path):
+    root = Path(path).resolve()
+    if not root.is_dir():
+        raise CliError("папка не найдена: %s" % root)
+    return root
+
+
+def linked_state(root):
+    state = load_state(root / STATE_FILE)
+    if not all(state.get(k) for k in ("projectId", "environmentId", "serviceId")):
+        raise CliError("%s ещё не задеплоено (нет %s). Сначала: small deploy" % (root, STATE_FILE))
+    return state
+
+
+def require_token():
+    token = token_from_env()
+    if not token:
+        raise CliError("не задан токен Railway. Создайте его в Railway → Account Settings → Tokens "
+                       "и положите в переменную окружения RAILWAY_API_TOKEN.")
+    return token
+
+
+def cmd_link(args):
+    root = app_dir(args.path)
+    state = linked_state(root)
+    if not state.get("domain"):
+        raise CliError("у сервиса нет публичного домена — выполните small deploy")
+    url = "https://%s/" % state["domain"]
+    token, source = access_token(root, state)
+    if token:
+        link = url + "?token=" + quote(token, safe="")
+        say("Ссылка-приглашение (ACCESS_TOKEN из %s). Кто её получит, тот войдёт:" % source)
+    else:
+        link = url
+        say("ACCESS_TOKEN не найден ни в %s, ни в Railway — адрес без токена:" % CONFIG_FILE)
+    print(link, flush=True)
+    if args.open:
+        webbrowser.open(link)
+    return 0
+
+
+def access_token(root, state):
+    """(первый ACCESS_TOKEN, откуда он) — из small.json, иначе из переменных сервиса в Railway."""
+    raw = load_config(root / CONFIG_FILE)["env"].get("ACCESS_TOKEN")
+    source = CONFIG_FILE
+    if not raw and token_from_env():
+        try:
+            raw = Railway(token_from_env()).service_variables(
+                state["projectId"], state["environmentId"], state["serviceId"]).get("ACCESS_TOKEN")
+            source = "Railway"
+        except RailwayError as e:
+            say("Не удалось прочитать переменные сервиса в Railway: %s" % e)
+    first = (raw or "").split(",")[0].strip()
+    return (first, source) if first else (None, None)
+
+
+def cmd_logs(args):
+    root = app_dir(args.path)
+    state = linked_state(root)
+    api = Railway(require_token())
+    deployment = api.latest_deployment(state["serviceId"], state["environmentId"])
+    if not deployment:
+        raise CliError("у сервиса %s ещё нет деплоев" % state.get("name", ""))
+    say("Лог %s · деплой %s · %s" % ("сборки" if args.build else "приложения", deployment["id"], deployment["status"]))
+
+    seen, last = set(), {"ts": None}
+
+    def show(entries):
+        for entry in entries:
+            key = (entry["timestamp"], entry["message"])
+            if key not in seen:
+                seen.add(key)
+                print("%s  %s" % (log_time(entry["timestamp"]), entry["message"]), flush=True)
+                last["ts"] = max(last["ts"] or "", entry["timestamp"])
+
+    show(api.log_entries(deployment["id"], build=args.build, limit=args.lines))
+    if not args.follow:
+        return 0
+    say("Слежу за новыми строками, Ctrl+C — выход")
+    try:
+        while True:
+            time.sleep(args.interval)
+            try:
+                show(api.log_entries(deployment["id"], build=args.build, limit=args.lines, start_date=last["ts"]))
+            except RailwayError as e:
+                say("  повторяю запрос: %s" % e)
+    except KeyboardInterrupt:
+        return 0
+
+
+def log_time(timestamp):
+    """ISO-время Railway (UTC, с наносекундами) -> локальное ЧЧ:ММ:СС."""
+    try:
+        moment = datetime.strptime(timestamp[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        return moment.astimezone().strftime("%H:%M:%S")
+    except (TypeError, ValueError):
+        return str(timestamp)
+
+
+def cmd_destroy(args):
+    root = app_dir(args.path)
+    state = linked_state(root)
+    api = Railway(require_token())
+    try:
+        project_name, services = api.project_services(state["projectId"])
+    except RailwayError as e:
+        raise CliError("проект %s не найден в Railway (%s). Если он уже удалён, удалите %s вручную"
+                       % (state["projectId"], e, root / STATE_FILE)) from None
+    others = [s["name"] for s in services if s["id"] != state["serviceId"]]
+    if others:
+        say("Будет удалён сервис %s из проекта %s. Другие сервисы проекта останутся: %s"
+            % (state.get("name", state["serviceId"]), project_name, ", ".join(others)))
+    else:
+        say("Будет удалён проект %s целиком: сервис, домен %s, переменные и все деплои."
+            % (project_name, state.get("domain") or "—"))
+    if not args.yes:
+        answer = ask("Введите имя проекта (%s) для подтверждения: " % project_name)
+        if answer is None:
+            raise CliError("подтвердите удаление флагом --yes. Ничего не удалено")
+        if answer != project_name:
+            raise CliError("имя не совпало. Ничего не удалено")
+
+    if others:
+        api.delete_service(state["serviceId"])
+    else:
+        api.delete_project(state["projectId"])
+    (root / STATE_FILE).unlink()
+    say("Удалено. %s удалён, %s оставлен: следующий small deploy создаст новый проект." % (STATE_FILE, CONFIG_FILE))
+    return 0
 
 
 def cmd_dashboard(args):
@@ -168,23 +328,26 @@ def unique_name(folder_name):
     return "%s-%s" % (slugify(folder_name)[:35].strip("-") or "app", secrets.token_hex(2))
 
 
-def confirm(prompt):
+def ask(prompt):
+    """Ответ пользователя или None, если терминала нет (скрипт, CI) или ввод закрыт."""
     if not sys.stdin or not sys.stdin.isatty():
-        return False
+        return None
     sys.stderr.write(prompt)
     sys.stderr.flush()
     try:
-        return input().strip().lower() in ("y", "yes", "д", "да")
-    except EOFError:  # ввод закрыт: считаем ответом «нет»
+        return input().strip()
+    except EOFError:
         sys.stderr.write("\n")
-        return False
+        return None
+
+
+def confirm(prompt):
+    answer = ask(prompt)
+    return answer is not None and answer.lower() in ("y", "yes", "д", "да")
 
 
 def cmd_deploy(args):
-    token = token_from_env()
-    if not token:
-        raise CliError("не задан токен Railway. Создайте его в Railway → Account Settings → Tokens "
-                       "и положите в переменную окружения RAILWAY_API_TOKEN.")
+    token = require_token()
     root = Path(args.path).resolve()
     if not root.is_dir():
         raise CliError("папка не найдена: %s" % root)

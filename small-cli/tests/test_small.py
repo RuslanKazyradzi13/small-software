@@ -36,8 +36,12 @@ class MockRailway:
     """Имитирует нужную часть backboard.railway.com: /graphql/v2 и /project/.../up."""
 
     def __init__(self, final_status="SUCCESS", workspaces=None, domain_free=True, projects=None, domain=None,
-                 live=None, delay=0):
+                 live=None, delay=0, service_vars=None, project=None, logs=None):
         self.final_status = final_status
+        self.service_vars = service_vars or {}  # переменные сервиса в Railway
+        self.project = project  # {"name", "services": [{"id", "name"}]} для project(id); None — «не найден»
+        failure = [("2026-10-10T12:00:00Z", "ERROR: No matching distribution for flask==99")]
+        self.logs = logs or {"buildLogs": failure, "deploymentLogs": failure}  # поле -> [(timestamp, message)]
         self.live = live or {}  # serviceId -> статус последнего деплоя ("" — деплоев не было)
         self.delay = delay      # задержка ответа GraphQL, для проверки таймаутов
         self.workspaces = workspaces if workspaces is not None else [{"id": "ws-1", "name": "Personal"}]
@@ -61,7 +65,8 @@ class MockRailway:
                     return self._send(200, {"errors": [{"message": "Not Authorized"}]})
                 path = urlparse(self.path)
                 if path.path == "/graphql/v2":
-                    time.sleep(mock_server.delay)
+                    if mock_server.delay:
+                        time.sleep(mock_server.delay)
                     return self._send(200, mock_server.graphql(json.loads(body)))
                 m = re.fullmatch(r"/project/([^/]+)/environment/([^/]+)/up", path.path)
                 if m and self.headers.get("Content-Type") == "application/gzip":
@@ -126,7 +131,19 @@ class MockRailway:
             status = self.statuses.pop(0) if self.statuses else self.final_status
             return {"data": {"deployment": {"status": status}}}
         if field in ("buildLogs", "deploymentLogs"):
-            return {"data": {field: [{"message": "ERROR: No matching distribution for flask==99"}]}}
+            lines = [line for line in self.logs.get(field, [])
+                     if not variables.get("startDate") or line[0] >= variables["startDate"]]
+            lines = lines[-(variables.get("limit") or len(lines) or 1):]
+            return {"data": {field: [{"timestamp": ts, "message": msg, "severity": "info"} for ts, msg in lines]}}
+        if field == "variables":
+            return {"data": {"variables": self.service_vars}}
+        if field == "project":
+            if self.project is None:
+                return {"errors": [{"message": "Project not found"}]}
+            edges = [{"node": service} for service in self.project["services"]]
+            return {"data": {"project": {"name": self.project["name"], "services": {"edges": edges}}}}
+        if field in ("projectDelete", "serviceDelete"):
+            return {"data": {field: True}}
         return {"errors": [{"message": "unknown field " + field}]}
 
     def upload(self, project_id, service_id, body):
@@ -931,6 +948,171 @@ class StreamlitTemplateTest(unittest.TestCase):
                 time.sleep(0.2)
         status, _, body = http_get(port, "/_stcore/health")
         self.assertEqual((status, body), (200, "ok"))
+
+
+class OpsCommandsTest(unittest.TestCase):
+    """small link / open / logs / destroy для уже задеплоенного приложения."""
+
+    STATE = {"name": "demo", "projectId": "proj-1", "environmentId": "env-1", "serviceId": "svc-1",
+             "domain": "demo.up.railway.app"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = self.tmp.name
+        write(self.app, "small.json", json.dumps({"name": "demo", "env": {"ACCESS_TOKEN": "tok-config, tok-2"}}))
+        write(self.app, ".small.json", json.dumps(self.STATE))
+
+    def railway(self, **kwargs):
+        kwargs.setdefault("project", {"name": "demo", "services": [{"id": "svc-1", "name": "demo"}]})
+        server = MockRailway(**kwargs)
+        self.addCleanup(server.close)
+        return server
+
+    def cli(self, server, *args, token=TOKEN):
+        env = {"SMALL_API_URL": server.url} if server else {}
+        if token:
+            env["RAILWAY_API_TOKEN"] = token
+        return run([*args, self.app], env)
+
+    # --- link / open ---
+
+    def test_link_uses_first_token_from_config(self):
+        with mock.patch("webbrowser.open") as browser:
+            code, out, err = self.cli(None, "link", token=None)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip(), "https://demo.up.railway.app/?token=tok-config")
+        self.assertIn("ACCESS_TOKEN из small.json", err)
+        browser.assert_not_called()
+
+    def test_open_prints_and_opens_link(self):
+        with mock.patch("webbrowser.open") as browser:
+            code, out, _ = self.cli(None, "open", token=None)
+        self.assertEqual(code, 0)
+        browser.assert_called_once_with(out.strip())
+
+    def test_link_falls_back_to_railway_variables(self):
+        write(self.app, "small.json", '{"name": "demo"}')
+        server = self.railway(service_vars={"ACCESS_TOKEN": "tok railway&x", "PORT": "8080"})
+        code, out, err = self.cli(server, "link")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip(), "https://demo.up.railway.app/?token=tok%20railway%26x")  # экранирование
+        self.assertIn("ACCESS_TOKEN из Railway", err)
+        self.assertEqual(server.variables["variables"],
+                         {"projectId": "proj-1", "environmentId": "env-1", "serviceId": "svc-1"})
+
+    def test_link_without_any_token_prints_plain_url(self):
+        write(self.app, "small.json", '{"name": "demo"}')
+        code, out, err = self.cli(None, "link", token=None)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "https://demo.up.railway.app/")
+        self.assertIn("ACCESS_TOKEN не найден", err)
+
+    def test_commands_need_a_deployed_app(self):
+        os.remove(os.path.join(self.app, ".small.json"))
+        for command in ("link", "open", "logs", "destroy"):
+            code, _, err = self.cli(None, command)
+            self.assertEqual(code, 1, command)
+            self.assertIn("Сначала: small deploy", err)
+
+    # --- logs ---
+
+    def test_logs_of_latest_deployment(self):
+        server = self.railway(live={"svc-1": "SUCCESS"}, logs={"deploymentLogs": [
+            ("2026-10-10T12:00:01.123456789Z", "Listening on 0.0.0.0:8080"),
+            ("2026-10-10T12:00:05Z", "[access-request] contact='me@example.com'")]})
+        code, out, err = self.cli(server, "logs")
+        self.assertEqual(code, 0, err)
+        lines = out.strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertRegex(lines[0], r"^\d\d:\d\d:\d\d  Listening on 0\.0\.0\.0:8080$")
+        self.assertTrue(lines[1].endswith("[access-request] contact='me@example.com'"))
+        self.assertIn("деплой dep-live · SUCCESS", err)
+        self.assertEqual(server.variables["deploymentLogs"]["id"], "dep-live")
+
+    def test_build_logs_and_line_limit(self):
+        server = self.railway(live={"svc-1": "FAILED"}, logs={"buildLogs": [
+            ("2026-10-10T12:00:0%dZ" % i, "step %d" % i) for i in range(5)]})
+        code, out, _ = run(["logs", self.app, "--build", "-n", "2"],
+                           {"SMALL_API_URL": server.url, "RAILWAY_API_TOKEN": TOKEN})
+        self.assertEqual(code, 0)
+        self.assertEqual([l.split("  ", 1)[1] for l in out.strip().splitlines()], ["step 3", "step 4"])
+        self.assertEqual(server.variables["buildLogs"]["limit"], 2)
+
+    def test_logs_without_deployments(self):
+        server = self.railway(live={"svc-1": ""})
+        code, _, err = self.cli(server, "logs")
+        self.assertEqual(code, 1)
+        self.assertIn("ещё нет деплоев", err)
+
+    def test_logs_follow_prints_only_new_lines(self):
+        first = [("2026-10-10T12:00:01Z", "old line")]
+        server = self.railway(live={"svc-1": "SUCCESS"}, logs={"deploymentLogs": list(first)})
+        sleeps = []
+
+        def fake_sleep(seconds):  # между опросами в «Railway» появляется новая строка; на 2-м опросе — Ctrl+C
+            if seconds != 2.0:  # time.sleep общий для процесса: чужие вызовы не трогаем
+                return
+            sleeps.append(seconds)
+            if len(sleeps) == 1:
+                server.logs["deploymentLogs"].append(("2026-10-10T12:00:09Z", "new line"))
+            else:
+                raise KeyboardInterrupt
+
+        with mock.patch("small_cli.cli.time.sleep", side_effect=fake_sleep):
+            code, out, err = run(["logs", self.app, "--follow"],
+                                 {"SMALL_API_URL": server.url, "RAILWAY_API_TOKEN": TOKEN})
+        self.assertEqual(code, 0, err)
+        self.assertEqual([l.split("  ", 1)[1] for l in out.strip().splitlines()], ["old line", "new line"])
+        self.assertEqual(server.variables["deploymentLogs"]["startDate"], "2026-10-10T12:00:01Z")
+
+    # --- destroy ---
+
+    def test_destroy_whole_project(self):
+        server = self.railway()
+        code, _, err = self.cli(server, "destroy", "--yes")
+        self.assertEqual(code, 0, err)
+        self.assertIn("projectDelete", server.calls)
+        self.assertNotIn("serviceDelete", server.calls)
+        self.assertEqual(server.variables["projectDelete"], {"id": "proj-1"})
+        self.assertFalse(Path(self.app, ".small.json").exists())
+        self.assertTrue(Path(self.app, "small.json").exists())   # настройки остаются
+
+    def test_destroy_only_own_service_in_shared_project(self):
+        server = self.railway(project={"name": "shared", "services": [
+            {"id": "svc-1", "name": "demo"}, {"id": "svc-db", "name": "postgres"}]})
+        code, _, err = self.cli(server, "destroy", "--yes")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(server.variables["serviceDelete"], {"id": "svc-1"})
+        self.assertNotIn("projectDelete", server.calls)
+        self.assertIn("Другие сервисы проекта останутся: postgres", err)
+
+    def test_destroy_requires_confirmation(self):
+        server = self.railway()
+        code, _, err = self.cli(server, "destroy")  # без терминала и без --yes
+        self.assertEqual(code, 1)
+        self.assertIn("--yes", err)
+        for answer, deleted in (("wrong-name", False), ("demo", True)):
+            with mock.patch.object(sys, "stdin") as stdin, mock.patch("builtins.input", return_value=answer):
+                stdin.isatty.return_value = True
+                code, _, err = self.cli(server, "destroy")
+            self.assertIn("Введите имя проекта (demo)", err)
+            self.assertEqual(code, 0 if deleted else 1, answer)
+            self.assertEqual(Path(self.app, ".small.json").exists(), not deleted)
+        self.assertEqual(server.calls.count("projectDelete"), 1)
+
+    def test_destroy_missing_project_keeps_state(self):
+        server = self.railway(project=None)
+        code, _, err = self.cli(server, "destroy", "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("не найден в Railway", err)
+        self.assertTrue(Path(self.app, ".small.json").exists())
+
+    def test_railway_commands_need_token(self):
+        for command in ("logs", "destroy"):
+            code, _, err = self.cli(None, command, token=None)
+            self.assertEqual(code, 1)
+            self.assertIn("RAILWAY_API_TOKEN", err)
 
 
 class LauncherTest(unittest.TestCase):

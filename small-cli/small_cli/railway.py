@@ -186,13 +186,41 @@ class Railway:
         data = self.graphql("query($id: String!) { deployment(id: $id) { status } }", {"id": deployment_id})
         return data["deployment"]["status"]
 
-    def logs(self, deployment_id, build=True, limit=40):
+    def log_entries(self, deployment_id, build=False, limit=100, start_date=None):
+        """Строки лога: [{"timestamp", "message", "severity"}]. start_date (ISO) — только строки начиная с него."""
         field = "buildLogs" if build else "deploymentLogs"
         data = self.graphql(
-            "query($id: String!, $limit: Int) { %s(deploymentId: $id, limit: $limit) { message } }" % field,
-            {"id": deployment_id, "limit": limit},
+            "query($id: String!, $limit: Int, $startDate: DateTime) "
+            "{ %s(deploymentId: $id, limit: $limit, startDate: $startDate) { timestamp message severity } }" % field,
+            {"id": deployment_id, "limit": limit, "startDate": start_date},
         )
-        return [entry["message"] for entry in data[field]]
+        return data[field]
+
+    def logs(self, deployment_id, build=True, limit=40):
+        return [entry["message"] for entry in self.log_entries(deployment_id, build=build, limit=limit)]
+
+    def service_variables(self, project_id, environment_id, service_id):
+        data = self.graphql(
+            "query($projectId: String!, $environmentId: String!, $serviceId: String) "
+            "{ variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }",
+            {"projectId": project_id, "environmentId": environment_id, "serviceId": service_id},
+        )
+        return data["variables"]
+
+    def project_services(self, project_id):
+        """(имя проекта, [{"id", "name"}] его сервисов)."""
+        data = self.graphql(
+            "query($id: String!) { project(id: $id) { name services { edges { node { id name } } } } }",
+            {"id": project_id},
+        )
+        project = data["project"]
+        return project["name"], [edge["node"] for edge in project["services"]["edges"]]
+
+    def delete_project(self, project_id):
+        self.graphql("mutation($id: String!) { projectDelete(id: $id) }", {"id": project_id})
+
+    def delete_service(self, service_id):
+        self.graphql("mutation($id: String!) { serviceDelete(id: $id) }", {"id": service_id})
 
 
 def _error_text(raw):
