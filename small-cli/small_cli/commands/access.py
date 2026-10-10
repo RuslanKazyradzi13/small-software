@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timezone
 
 from .. import access as tokens
+from .. import gateway
 from ..common import CliError, app_dir, linked_state, require_token, say
 from ..config import CONFIG_FILE, STATE_FILE, load_config, load_state
 from ..i18n import tr
@@ -143,10 +144,10 @@ def grant_access(root, who, deploy=True, warn=None):
 
 
 def _grant_email(root, email, deploy, warn):
-    problem = tokens.email_login_problem(root)
+    state = load_state(root / STATE_FILE)
+    problem = tokens.email_login_problem(root, state)
     if problem:
         raise CliError(problem)
-    state = load_state(root / STATE_FILE)
     env, _ = tokens.app_env(root, state, warn=warn)
     emails = tokens.parse_emails(env.get("ACCESS_EMAILS"))
     if email in emails:
@@ -269,10 +270,11 @@ def signout_access(root, who, deploy=True, warn=None):
     if who != "*" and not tokens.is_email(who):
         raise CliError(tr("specify an email address (ivan@company.com), a domain (@company.com) or --all",
                           "укажите адрес почты (ivan@company.com), домен (@company.com) или --all"))
-    problem = tokens.feature_problem(root)
+    state = load_state(root / STATE_FILE)
+    problem = tokens.feature_problem(root, state)
     if problem:
         raise CliError(problem)
-    env, _ = tokens.app_env(root, load_state(root / STATE_FILE), warn=warn)
+    env, _ = tokens.app_env(root, state, warn=warn)
     value = tokens.add_revoked(env.get("SESSIONS_REVOKED"), who, time.time())
     return {"who": who, "linked": change_env(root, {"SESSIONS_REVOKED": value}, deploy=deploy)}
 
@@ -309,7 +311,7 @@ def access_log(root, limit=50):
     plan keeps logs."""
     state = linked_state(root)
     entries = Railway(require_token()).environment_logs(
-        state["environmentId"], "@service:%s @magic_link:*" % state["serviceId"], limit=limit)
+        state["environmentId"], "@service:%s @magic_link:*" % gateway.public_service(state), limit=limit)
     rows = []
     for entry in entries:
         fields = entry["attributes"]

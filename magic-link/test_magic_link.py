@@ -956,6 +956,123 @@ class TelegramTest(unittest.TestCase):
 
 
 
+def whoami_app(environ, start_response):
+    """An app that shows who magic_link let in and which X-Small-* headers reached it."""
+    body = json.dumps({"user": environ.get("magic_link.user"), "method": environ.get("magic_link.method"),
+                       "small_user": environ.get("HTTP_X_SMALL_USER")}).encode()
+    start_response("200 OK", [("Content-Type", "application/json")])
+    return [body]
+
+
+async def whoami_asgi(scope, receive, send):
+    if scope["type"] == "websocket":
+        return await send({"type": "websocket.accept", "user": scope.get("magic_link.user")})
+    headers = {k.decode(): v.decode() for k, v in scope.get("headers") or []}
+    body = json.dumps({"user": scope.get("magic_link.user"), "method": scope.get("magic_link.method"),
+                       "small_user": headers.get("x-small-user")}).encode()
+    await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"application/json")]})
+    await send({"type": "http.response.body", "body": body})
+
+
+class IdentityForTheAppTest(EmailLoginBase):
+    """The app learns who is signed in: environ / scope["magic_link.user"] and ["magic_link.method"]."""
+
+    def make(self, emails=None, secret="test-secret"):
+        return MagicLink(whoami_app, tokens="bob:tok-b,tok-shared", request_url="", emails=emails or self.EMAILS,
+                         secret=secret)
+
+    def test_user_and_method(self):
+        email = json.loads(call(self.app, cookie=self.login())[2])
+        self.assertEqual((email["user"], email["method"]), ("ivan@company.com", "email"))
+        bob = json.loads(call(self.app, cookie="%s=%s" % (COOKIE_NAME, _cookie_value("tok-b")))[2])
+        self.assertEqual((bob["user"], bob["method"]), ("bob", "link"))
+        shared = json.loads(call(self.app, cookie="%s=%s" % (COOKIE_NAME, _cookie_value("tok-shared")))[2])
+        self.assertEqual((shared["user"], shared["method"]), ("", "link"))
+        google = self.app.gate.new_session("olga@team.com", "google")
+        self.assertEqual(json.loads(call(self.app, cookie="%s=%s" % (COOKIE_NAME, google))[2])["method"], "google")
+
+    def test_nobody_else_can_claim_the_gateway_headers(self):
+        cookie = self.login()
+        seen = json.loads(call(self.app, cookie=cookie, headers={"HTTP_X_SMALL_USER": "boss@company.com"})[2])
+        self.assertEqual((seen["user"], seen["small_user"]), ("ivan@company.com", None))
+        app = MagicLinkASGI(whoami_asgi, tokens="", request_url="", emails=self.EMAILS, secret="test-secret")
+        _, _, body, _, _ = asgi_call(app, cookie=cookie, headers={"x-small-user": "boss@company.com"})
+        self.assertEqual((json.loads(body)["user"], json.loads(body)["small_user"]), ("ivan@company.com", None))
+
+
+class BehindGatewayTest(unittest.TestCase):
+    """SMALL_GATEWAY_KEY: the app is behind the small gateway and trusts only what it signed."""
+
+    KEY = "gateway-key"
+
+    def signed(self, user="ivan@company.com", method="google", key=KEY, now=None):
+        return {"HTTP_X_SMALL_USER": user, "HTTP_X_SMALL_METHOD": method,
+                "HTTP_X_SMALL_AUTH": magic_link.gateway_auth(key, user, method, now)}
+
+    def test_signature(self):
+        auth = magic_link.gateway_auth(self.KEY, "ivan@company.com", "email", now=1000)
+        self.assertTrue(auth.startswith("1000."))
+        # The same as magic-link.js (its tests hold the same vector).
+        self.assertEqual(magic_link.gateway_auth("k", "ivan@company.com", "email", now=1000),
+                         "1000.ZrBSpSZFSwHxn5XA3H2cLNHOzS5bnkoWx-3A0rQCdWY")
+        self.assertEqual(magic_link.gateway_identity(self.KEY, "ivan@company.com", "email", auth, now=1000),
+                         ("ivan@company.com", "email"))
+        for args in ((self.KEY, "boss@company.com", "email", auth), (self.KEY, "ivan@company.com", "link", auth),
+                     ("another-key", "ivan@company.com", "email", auth), ("", "ivan@company.com", "email", auth),
+                     (self.KEY, "ivan@company.com", "email", "x.y"), (self.KEY, "ivan@company.com", "email", "")):
+            self.assertIsNone(magic_link.gateway_identity(*args, now=1000), args[1:])
+        self.assertIsNone(magic_link.gateway_identity(self.KEY, "ivan@company.com", "email", auth,
+                                                      now=1000 + magic_link.GATEWAY_TTL + 1))  # too old
+        self.assertIsNone(magic_link.gateway_identity(self.KEY, "ivan@company.com", "email", auth, now=1000 - 3600))
+
+    def test_wsgi(self):
+        with mock.patch.dict(os.environ, {"ACCESS_EMAILS": "", "ACCESS_TOKEN": ""}):
+            app, log = quiet(MagicLink, whoami_app, gateway_key=self.KEY)
+        self.assertIn("за шлюзом small", log)
+        self.assertNotIn("доступ закрыт для всех", log)  # no access variables is normal behind the gateway
+        status, _, body, _ = call(app, headers=self.signed())
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(json.loads(body), {"user": "ivan@company.com", "method": "google",
+                                            "small_user": "ivan@company.com"})
+        self.assertEqual(json.loads(call(app, headers=self.signed(user="", method="link"))[2])["user"], "")
+        for headers in ({}, self.signed(key="forged"), dict(self.signed(), HTTP_X_SMALL_USER="boss@company.com"),
+                        self.signed(now=time.time() - magic_link.GATEWAY_TTL - 60)):
+            status, _, body, _ = call(app, headers=headers)
+            self.assertEqual(status, "403 Forbidden", headers)
+            self.assertIn("Откройте приложение по его адресу", body)
+        # Sign-in pages and invite links are the gateway's business, not the app's.
+        self.assertEqual(call(app, path="/_access/login", method="POST", body=b"email=ivan%40company.com")[0],
+                         "403 Forbidden")
+        self.assertEqual(call(app, query="token=anything")[0], "403 Forbidden")
+
+    def test_asgi_and_websocket(self):
+        app = quiet(MagicLinkASGI, whoami_asgi, gateway_key=self.KEY)[0]
+        headers = {k[5:].lower().replace("_", "-"): v for k, v in self.signed(method="microsoft").items()}
+        status, _, body, _, _ = asgi_call(app, headers=headers)
+        self.assertEqual((status, json.loads(body)["method"]), (200, "microsoft"))
+        self.assertEqual(asgi_call(app)[0], 403)
+        *_, sent, _ = asgi_call(app, kind="websocket", headers=headers)
+        self.assertEqual(sent, [{"type": "websocket.accept", "user": "ivan@company.com"}])
+        *_, sent, _ = asgi_call(app, kind="websocket", cookie="small_access=anything")
+        self.assertEqual(sent, [{"type": "websocket.close", "code": 1008}])
+
+    def test_gate(self):
+        gate = quiet(MagicLinkGate, gateway_key=self.KEY)[0]
+        self.assertTrue(gate.behind_gateway)
+        headers = {k[5:].replace("_", "-"): v for k, v in self.signed().items()}  # any case works
+        self.assertEqual(gate.gateway_user(headers), "ivan@company.com")
+        self.assertIsNone(gate.gateway_user({}))
+        plain = quiet(MagicLinkGate, emails="ivan@company.com", secret="s", gateway_key="")[0]
+        self.assertFalse(plain.behind_gateway)
+        self.assertIsNone(plain.gateway_user(headers))  # without a key nothing is trusted
+
+    def test_the_key_comes_from_the_environment(self):
+        with mock.patch.dict(os.environ, {"SMALL_GATEWAY_KEY": self.KEY}):
+            app = quiet(MagicLink, whoami_app)[0]
+        self.assertEqual(call(app, headers=self.signed())[0], "200 OK")
+        self.assertEqual(call(app)[0], "403 Forbidden")
+
+
 def call_raw(app, path, query="", cookie=None, method="GET", body=b"", quiet_log=True):
     """(status, header list) of a WSGI call: unlike call(), keeps repeated headers such as two Set-Cookie."""
     environ = {"PATH_INFO": path, "QUERY_STRING": query, "REQUEST_METHOD": method, "HTTP_X_FORWARDED_PROTO": "https",

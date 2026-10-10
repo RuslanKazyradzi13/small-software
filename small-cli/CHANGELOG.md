@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.9.0 — 2026-10-11
+
+### Added
+- **The gateway: sign-in in front of any app, without code changes.** `small gateway on` puts `<app>-gateway` — Caddy
+  with magic-link next to it — in front of the app: it takes the app's address and the sign-in settings, checks every
+  request (websockets included) and passes the ones it lets in over Railway's private network. The app keeps running
+  without a public address, in any language or framework (Go, Rails, Jupyter, a Dockerfile…). `small gateway off`
+  gives everything back. The gateway image is checked in CI through the real Caddy.
+- **Private by default, for every app.** The first `small deploy` of a folder without sign-in of its own sets the
+  gateway up before the app ever has an address, and puts your own invite link in `small.json` (`small open`).
+  `small deploy --public` deploys such an app open to anyone; redeploying an open app prints a warning.
+- **The app knows who is signed in:** `environ["magic_link.user"]` / `["magic_link.method"]` (WSGI),
+  `scope["magic_link.user"]` (ASGI), `req.magicLinkUser` (Node.js). Behind the gateway: the `X-Small-User`,
+  `X-Small-Method` and `X-Small-Auth` headers — the last an HMAC-SHA256 signature with `SMALL_GATEWAY_KEY`, documented
+  so that apps in other languages can check it.
+- **magic-link behind the gateway** (`SMALL_GATEWAY_KEY`): trusts only the gateway's signature, so template apps keep
+  working behind it, and a request around the gateway gets in nowhere. The Streamlit template uses it too, with an
+  `HttpOnly` cookie set by the gateway.
+- `small logs --gateway`, `small volume add --gateway`; `small sleep`, `small domain`, `small access log` and
+  `small destroy` follow the gateway; `small deploy` rebuilds a gateway made by an older small.
+
+### Changed
+- With the gateway, sign-in variables live on the gateway and the rest on the app; `small env`, `small access`,
+  `small sso`, `small mail` and `small deploy` route them and restart only the service that changed.
+- A visitor's `X-Small-*` headers are dropped before they reach the app, with or without the gateway.
+- Dependabot keeps the gateway's Caddy image up to date.
+
 ## 0.8.0 — 2026-10-11
 
 ### Added

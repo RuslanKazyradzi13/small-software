@@ -164,6 +164,9 @@ class Railway:
         self.graphql("mutation($input: ServiceDomainUpdateInput!) { serviceDomainUpdate(input: $input) }",
                      {"input": inp})
 
+    def delete_domain(self, domain_id):
+        self.graphql("mutation($id: String!) { serviceDomainDelete(id: $id) }", {"id": domain_id})
+
     def service_domains(self, project_id, environment_id, service_id):
         data = self.graphql(
             """query($p: String!, $e: String!, $s: String!) {

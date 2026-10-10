@@ -550,6 +550,24 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.environ["ACCESS_DB"] = ""  # in memory a sign-out wouldn't survive a restart: no button
         self.assertEqual(self.labels(self.open().sidebar.button), ["Выйти"])
 
+    @needs_streamlit
+    def test_behind_the_gateway(self):
+        magic = self.magic_link()
+        self.environ.update(SMALL_GATEWAY_KEY="gw-key", ACCESS_EMAILS="", ACCESS_TOKEN="", SESSION_SECRET="")
+        at = self.open()
+        self.assertIn("Откройте приложение по его адресу", at.markdown[0].value)
+        self.assertEqual((len(at.title), self.labels(at.text_input), self.labels(at.button)), (0, [], []))
+        self.headers = {"X-Small-User": "ivan@company.com", "X-Small-Method": "google",
+                        "X-Small-Auth": magic.gateway_auth("gw-key", "ivan@company.com", "google")}
+        at = self.open()
+        self.assert_app(at)
+        self.assertIn("ivan", at.sidebar.caption[0].value)
+        self.assertIn('href="/_access/logout" target="_self"', at.sidebar.markdown[0].value)
+        self.assertEqual(self.frames(at), [])  # the gateway keeps the HttpOnly cookie: nothing written here
+        self.assert_app(self.go(at.sidebar.slider[0].set_value(300)))  # reruns don't check again
+        self.headers["X-Small-Auth"] = magic.gateway_auth("another-key", "ivan@company.com", "google")
+        self.assertIn("Откройте приложение по его адресу", self.open().markdown[0].value)
+
 def setUpModule():
     i18n.use("ru")  # the checks read small's Russian text; the machine's and CI's language don't matter
 

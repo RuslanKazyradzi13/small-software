@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "small-software"
-version = "0.8.0"
+version = "0.9.0"
 description = "A cloud for small software: deploy team apps to Railway in one command, private by default, shared by work email"
 license = "MIT"
 license-files = ["LICENSE"]

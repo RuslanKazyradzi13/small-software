@@ -2,16 +2,23 @@
 -> serviceDomainCreate -> write the variables from small.json (variableCollectionUpsert) -> upload the archive
 (POST .../up) -> poll deployment(id).status -> print https://<domain>.
 
+Private by default: the first deploy of an app without sign-in of its own (no magic_link next to its code) puts the
+small gateway in front of it before it ever gets an address (see small gateway); --public opts out.
+
 Progress goes to stderr and the final URL to stdout, so `URL=$(small deploy)` works.
 """
 
 import argparse
+import json
 import os
 import time
 
+from .. import access as tokens
+from .. import gateway
 from ..archive import collect_files, make_tarball
 from ..common import CliError, app_dir, format_elapsed, human_size, require_token, say, slugify
 from ..config import CONFIG_FILE, STATE_FILE, load_config, load_state, save_state
+from .. import __version__
 from ..i18n import lang, tr
 from ..railway import Railway, RailwayError
 
@@ -37,6 +44,9 @@ def register(sub):
     d.add_argument("--port", type=int, help=tr("port the app listens on (by default Railway uses $PORT)",
                                                "порт, который слушает приложение (по умолчанию Railway берёт $PORT)"))
     d.add_argument("-m", "--message", help=tr("deploy message", "подпись деплоя"))
+    d.add_argument("--public", action="store_true",
+                   help=tr("an app without sign-in of its own: deploy it open to anyone, without the gateway",
+                           "приложение без своего входа: задеплоить открытым для всех, без шлюза"))
     d.add_argument("--new", action="store_true",
                    help=tr("create a new project even if %s exists", "создать новый проект, даже если есть %s")
                    % STATE_FILE)
@@ -86,16 +96,34 @@ def cmd_deploy(args):
         else:
             project_id, environment_id = api.create_project(name, workspace_id)
             say(tr("Created project %s", "Создан проект %s") % name)
-            service_id = api.create_service(project_id, environment_id, name)
+            try:
+                service_id = api.create_service(project_id, environment_id, name)
+            except RailwayError:
+                api.delete_project(project_id)  # an empty project of our own, e.g. after Railway's daily limit
+                raise
             say(tr("Created service %s", "Создан сервис %s") % name)
             state = {"name": name, "projectId": project_id,
                      "environmentId": environment_id, "serviceId": service_id}
         # Save right away: if the build fails, a rerun won't spawn new projects.
         save_state(state_path, state)
 
+    private = not reused and not gateway.is_on(state) and not args.public and not gateway.has_own_sign_in(root)
+    if private:
+        # No sign-in of its own: the gateway comes first, so the app never has an open address.
+        from .gateway import create
+
+        config = ensure_owner_link(root, config)
+        create(api, root, state, config["env"], args.port)
+        save_state(state_path, state)
+    elif not gateway.is_on(state) and not gateway.has_own_sign_in(root) and not args.public:
+        say(tr("Warning: the app has no sign-in of its own, so anyone with its address gets in. Protect it: "
+               "small gateway on",
+               "Внимание: своего входа у приложения нет, в него попадёт любой, у кого есть адрес. Защитить: "
+               "small gateway on"))
+
     if not state.get("domain"):
         # Domain before the code upload: the very first build already needs its address (links in sign-in emails).
-        state["domain"] = ensure_domain(api, state, args.port)
+        state["domain"] = ensure_domain(api, state, gateway.GATEWAY_PORT if gateway.is_on(state) else args.port)
         save_state(state_path, state)
         say(tr("Public domain: %s", "Публичный домен: %s") % state["domain"])
 
@@ -109,8 +137,10 @@ def cmd_deploy(args):
     if variables and "OWNER_LANG" not in variables:
         variables["OWNER_LANG"] = lang()  # log lines and Telegram notifications in the owner's language
     if variables:
-        # Before the code upload, so the new build gets the variables right away. Values are not printed.
-        api.upsert_variables(state["projectId"], state["environmentId"], state["serviceId"], variables)
+        # Before the code upload, so the new build gets the variables right away. Values are not printed. Behind the
+        # gateway, the sign-in variables go to the gateway (gateway.services_for).
+        for service_id, values in gateway.split(variables, state).items():
+            api.upsert_variables(state["projectId"], state["environmentId"], service_id, values)
         say(tr("Variables from %s: %s%s", "Переменные из %s: %s%s")
             % (CONFIG_FILE, ", ".join(sorted(config["env"])),
                tr(" (+ PUBLIC_URL for sign-in emails)", " (+ PUBLIC_URL для писем входа)")
@@ -125,6 +155,16 @@ def cmd_deploy(args):
         raise
     deployment_id = up["deploymentId"]
     say(tr("Code uploaded, deploy %s", "Код загружен, деплой %s") % deployment_id)
+    gateway_deployment = None
+    if gateway.outdated(state):  # a new gateway, or one built by another version of small: this version's code
+        if not gateway.wait_for_private_address(api, state, interval=args.interval or 0.1):
+            say(tr("Railway hasn't given the app its private address yet: if the app answers 508, run small deploy "
+                   "again",
+                   "Railway ещё не выдал приложению внутренний адрес: если приложение ответит 508, запустите "
+                   "small deploy ещё раз"))
+        say(tr("Building the gateway (small %s)…", "Собираю шлюз (small %s)…") % __version__)
+        gateway_deployment = gateway.upload(api, state)
+        save_state(state_path, state)
     if up.get("logsUrl"):
         say(tr("Logs: %s", "Логи: %s") % up["logsUrl"].rstrip("&"))
 
@@ -138,9 +178,38 @@ def cmd_deploy(args):
     if status not in OK_STATUSES:
         show_logs(api, deployment_id, build=(status == "FAILED"))
         raise CliError(tr("deploy finished with status %s", "деплой завершился со статусом %s") % status)
+    if gateway_deployment:
+        status = wait_for_deployment(api, gateway_deployment, args.timeout, args.interval)
+        if status not in OK_STATUSES:
+            show_logs(api, gateway_deployment, build=(status == "FAILED"))
+            raise CliError(tr("the gateway's deploy finished with status %s; the app is not reachable until it works "
+                              "(small logs --gateway)",
+                              "деплой шлюза завершился со статусом %s; пока он не заработает, приложение недоступно "
+                              "(small logs --gateway)") % status)
     say(tr("Done!", "Готово!"))
+    if private:
+        say(tr("The app is private: it has no sign-in of its own, so small put its gateway in front. Open it yourself: "
+               "small open; let people in: small access add ivan@company.com (or small deploy --public next time to "
+               "deploy an app open to anyone).",
+               "Приложение закрыто: своего входа у него нет, поэтому small поставил перед ним шлюз. Открыть самому: "
+               "small open; пустить людей: small access add ivan@company.com (а чтобы задеплоить открытое для всех "
+               "приложение, в следующий раз: small deploy --public)."))
     print(url)
     return 0
+
+
+def ensure_owner_link(root, config):
+    """The owner's invite link (ACCESS_TOKEN in small.json, as small init makes it), so that small open lets the owner
+    into a private app right away. Returns small.json as read again."""
+    if config["env"].get("ACCESS_TOKEN") or config["env"].get("ACCESS_EMAILS"):
+        return config
+    path = root / CONFIG_FILE
+    raw = json.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else {}
+    raw.setdefault("env", {})["ACCESS_TOKEN"] = tokens.new_token()
+    path.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    say(tr("ACCESS_TOKEN for your own invite link is in %s (small open uses it; the file is for you only).",
+           "ACCESS_TOKEN для вашей личной ссылки — в %s (её использует small open; файл только для вас).") % CONFIG_FILE)
+    return load_config(path)
 
 
 def pick_workspace(api):
@@ -185,15 +254,19 @@ def bind_existing(api, name, workspace_id):
         say(tr("Created service %s", "Создан сервис %s") % name)
         return state
     state["serviceId"] = service["id"]
-    domains = api.service_domains(project["id"], env["id"], service["id"])
+    gateway_service = next((s for s in services if s["name"] == service["name"] + "-gateway"), None)
+    if gateway_service:  # deployed with the gateway from another computer: rebuilt by this version on deploy
+        state["gateway"] = {"serviceId": gateway_service["id"], "name": gateway_service["name"]}
+    domains = api.service_domains(project["id"], env["id"], gateway.public_service(state))
     if domains:
         state["domain"] = domains[0]["domain"]
     return state
 
 
 def ensure_domain(api, state, port):
-    """Creates a *.up.railway.app domain and tries to rename it to <name>.up.railway.app."""
-    sid, eid = state["serviceId"], state["environmentId"]
+    """Creates a *.up.railway.app domain for the public service (the gateway, if there is one) and tries to rename it
+    to <name>.up.railway.app."""
+    sid, eid = gateway.public_service(state), state["environmentId"]
     domain_id, domain = api.create_domain(sid, eid, port)
     wanted = state["name"] + ".up.railway.app"
     if domain == wanted:

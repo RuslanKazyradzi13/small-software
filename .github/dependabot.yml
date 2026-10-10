@@ -4,3 +4,7 @@ updates:
     directory: /
     schedule:
       interval: monthly
+  - package-ecosystem: docker  # the gateway's Caddy image: security updates arrive as pull requests
+    directory: /small-cli/small_cli/templates/gateway
+    schedule:
+      interval: weekly

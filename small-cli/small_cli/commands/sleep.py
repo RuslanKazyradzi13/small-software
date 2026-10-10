@@ -3,6 +3,7 @@ the first request wakes it up (a few seconds of delay)."""
 
 import argparse
 
+from .. import gateway
 from ..common import app_dir, linked_state, require_token, say
 from ..i18n import tr
 from ..railway import Railway
@@ -48,9 +49,11 @@ def cmd_sleep(args):
         say(tr("Sleep mode is already %s.", "Режим сна уже %s.")
             % (tr("on", "включён") if wanted else tr("off", "выключен")))
         return 0
-    api.update_instance(sid, eid, sleepApplication=wanted)
-    if not args.no_deploy:
-        api.redeploy(sid, eid)
+    services = [sid] + ([state["gateway"]["serviceId"]] if gateway.is_on(state) else [])
+    for service_id in services:  # behind the gateway both sleep: the first request wakes the gateway, it wakes the app
+        api.update_instance(service_id, eid, sleepApplication=wanted)
+        if not args.no_deploy:
+            api.redeploy(service_id, eid)
     say(tr("Sleep mode turned %s%s.", "Режим сна %s%s.") % (
         tr("on", "включён") if wanted else tr("off", "выключен"),
         tr(", Railway is restarting the app", ", Railway перезапускает приложение") if not args.no_deploy else

@@ -18,7 +18,12 @@
  *   - Invitation link https://<app>/?token=<token> (ACCESS_TOKEN): sets a cookie and redirects without the token.
  * The browser remembers a sign-in for 30 days. Without access: a 403 page with the sign-in options (if ACCESS_EMAILS
  * is set) or a "Request access" button. Sign-ins, refusals and access requests are logged as single-line JSON
- * (Railway shows them as structured logs, `small access log` reads them).
+ * (Railway shows them as structured logs, `small access log` reads them). The app learns who is signed in from
+ * req.magicLinkUser and how from req.magicLinkMethod ("email", "google", "microsoft" or "link").
+ *
+ * Behind the small gateway (small gateway on) the gateway does all of the above, and this file in the app only checks
+ * that a request came through it: SMALL_GATEWAY_KEY set means "trust the gateway's signed X-Small-User,
+ * X-Small-Method and X-Small-Auth headers, and nothing else".
  *
  * Environment variables:
  *   ACCESS_EMAILS       comma-separated addresses; "@company.com" means the whole domain. Remove an address and
@@ -43,6 +48,8 @@
  *   ACCESS_LANG         language of pages and emails: ru, en or auto (default: from the Accept-Language header).
  *   OWNER_LANG          language of messages for the owner (log lines and Telegram notifications): en (default)
  *                       or ru. small deploy sets it to match small's language.
+ *   SMALL_GATEWAY_KEY   the app is behind the small gateway: let in only requests it signed with this key (small
+ *                       gateway on sets it); the variables above then belong to the gateway
  */
 
 const crypto = require('node:crypto');
@@ -60,6 +67,8 @@ const SSO_PATH = '/_access/sso/'; // /_access/sso/google starts single sign-on w
 const SSO_CALLBACK = '/_access/sso/callback'; // the redirect URI to register with Google and Microsoft
 const SSO_TTL = 10 * 60; // how long a started single sign-on may take
 const CLOCK_SKEW = 5 * 60; // leeway for the provider's clock when checking ID token times
+const GATEWAY_TTL = 24 * 3600; // how long the gateway's signature on a request stays valid
+const GATEWAY_HEADERS = ['x-small-user', 'x-small-method', 'x-small-auth']; // what the small gateway adds for the app
 // How many sign-in emails can be requested within 15 minutes: per address and per IP.
 const LIMIT_PER_EMAIL = 3;
 const LIMIT_PER_IP = 10;
@@ -102,6 +111,7 @@ const MESSAGES = {
     unverified: ['&#9888;&#65039;', 'Нужен рабочий аккаунт',
       'Этот аккаунт не подтверждает, что адрес %s принадлежит вашей организации. Войдите рабочим аккаунтом.'],
     sso_failed: ['&#9888;&#65039;', 'Не удалось войти', 'Вход не завершился. Попробуйте ещё раз.'],
+    gateway: ['&#128274;', 'Откройте приложение по его адресу', 'Это приложение открывается только через свой адрес, где проверяется вход.'],
   },
   en: {
     forbidden: ['&#128274;', 'Invitation only', 'This page opens only with an invitation link from its owner.'],
@@ -123,6 +133,7 @@ const MESSAGES = {
     unverified: ['&#9888;&#65039;', 'Use your work account',
       "This account doesn't confirm that %s belongs to your organization. Sign in with your work account."],
     sso_failed: ['&#9888;&#65039;', 'Sign-in failed', "Sign-in didn't complete. Please try again."],
+    gateway: ['&#128274;', 'Open the app at its address', 'This app opens only through its own address, where sign-in is checked.'],
   },
 };
 
@@ -180,8 +191,9 @@ function magicLink(options = {}) {
   const tokens = entries.map((e) => [e.name, e.token]);
   const cookies = entries.map((e) => [e.name, cookieValue(e.token)]);
   const emails = parseEmails(options.emails ?? process.env.ACCESS_EMAILS ?? '');
+  const gatewayKey = String(options.gatewayKey ?? process.env.SMALL_GATEWAY_KEY ?? '').trim();
   let secret = String(options.secret ?? process.env.SESSION_SECRET ?? '').trim();
-  if (emails.size && !secret) {
+  if (emails.size && !secret && !gatewayKey) {
     console.log(ownerText('[magic-link] SESSION_SECRET is not set: everyone will have to sign in again after a restart',
       '[magic-link] SESSION_SECRET не задан: после перезапуска приложения всем придётся войти заново'));
   }
@@ -198,17 +210,20 @@ function magicLink(options = {}) {
   const ssoIds = Object.keys(sso);
   const revoked = parseRevoked(process.env.SESSIONS_REVOKED || '');
   const store = openStore();
-  if (!entries.length && !emails.size) {
+  if (gatewayKey) {
+    console.log(ownerText('[magic-link] behind the small gateway: only requests it signed get in',
+      '[magic-link] за шлюзом small: пускаются только запросы, подписанные шлюзом'));
+  } else if (!entries.length && !emails.size) {
     console.log(ownerText('[magic-link] neither ACCESS_TOKEN nor ACCESS_EMAILS is set: nobody can get in',
       '[magic-link] ACCESS_TOKEN и ACCESS_EMAILS не заданы: доступ закрыт для всех'));
   }
-  if (String(process.env.MICROSOFT_CLIENT_ID || '').trim() && !ssoProviders().microsoft) {
+  if (String(process.env.MICROSOFT_CLIENT_ID || '').trim() && !ssoProviders().microsoft && !gatewayKey) {
     console.log(ownerText('[magic-link] sign-in with Microsoft is off: it needs MICROSOFT_CLIENT_SECRET and '
       + 'MICROSOFT_TENANT_ID (a GUID). Set it up: small sso microsoft',
     '[magic-link] вход через Microsoft выключен: нужны MICROSOFT_CLIENT_SECRET и MICROSOFT_TENANT_ID (GUID). '
       + 'Настроить: small sso microsoft'));
   }
-  if (emails.size && !mailMode() && !ssoIds.length) {
+  if (emails.size && !mailMode() && !ssoIds.length && !gatewayKey) {
     console.log(ownerText('[magic-link] email is not set up (RESEND_API_KEY): sign-in emails will not be sent. Set it up: small mail',
       '[magic-link] почта не настроена (RESEND_API_KEY): письма для входа не уйдут. Подключить: small mail'));
   }
@@ -335,11 +350,18 @@ function magicLink(options = {}) {
 
   // The address of a valid session "e.<signed>" (not expired, not signed out), whether or not it still has access.
   function sessionEmail(value) {
+    const session = sessionOf(value);
+    return session ? session[0] : null;
+  }
+
+  // [address, sign-in method] of a valid session, whether or not it still has access; or null.
+  function sessionOf(value) {
     const data = value && value.startsWith('e.') ? unsign('session', value.slice(2)) : null;
     if (!data || typeof data.e !== 'string' || !data.e) return null;
     // Sessions made before 0.8 don't say when they were issued: their expiry minus the lifetime does.
     const issued = typeof data.i === 'number' ? data.i : data.x - maxAge;
-    return issued > signedOutAt(data.e) ? data.e : null;
+    if (issued <= signedOutAt(data.e)) return null;
+    return [data.e, ['email', 'google', 'microsoft'].includes(data.m) ? data.m : 'email'];
   }
 
   function newSession(email, method) {
@@ -348,13 +370,15 @@ function magicLink(options = {}) {
     return 'e.' + sign('session', { e: email, i: Math.floor(now * 1000) / 1000, x: Math.floor(now) + maxAge, m: method });
   }
 
-  function cookieOwner(req) {
+  // Who is signed in and how: [address or ACCESS_TOKEN name, "email" / "google" / "microsoft" / "link"], or null.
+  function whoIs(req) {
     const value = readCookie(req.headers.cookie, cookieName);
     if (value && value.startsWith('e.')) {
-      const email = sessionEmail(value);
-      return email && emailAllowed(email) ? email : null;
+      const session = sessionOf(value);
+      return session && emailAllowed(session[0]) ? session : null;
     }
-    return owner(value, cookies);
+    const name = owner(value, cookies);
+    return name === null ? null : [name, 'link'];
   }
 
   // App address for the link in the email and for sign-on redirects. The Host header is trusted only locally:
@@ -524,7 +548,19 @@ function magicLink(options = {}) {
     });
   }
 
+  // The request goes on to the app: who is signed in, and without the gateway's headers unless they were checked.
+  function letIn(req, next, [user, method]) {
+    if (!gatewayKey) for (const name of GATEWAY_HEADERS) delete req.headers[name];
+    req.magicLinkUser = user;
+    req.magicLinkMethod = method;
+    return next();
+  }
+
   return function magicLinkMiddleware(req, res, next) {
+    if (gatewayKey) { // behind the gateway it has checked everything: only its signature counts here
+      const who = gatewayIdentity(gatewayKey, ...GATEWAY_HEADERS.map((name) => String(req.headers[name] || '')));
+      return who ? letIn(req, next, who) : page(req, res, 403, 'gateway');
+    }
     const url = new URL(req.url, 'http://localhost');
     const path = url.pathname;
     if (req.method === 'POST' && path === REQUEST_PATH && !requestUrl) {
@@ -558,9 +594,28 @@ function magicLink(options = {}) {
       return res.end();
     }
 
-    if (cookieOwner(req) !== null) return next();
+    const who = whoIs(req);
+    if (who !== null) return letIn(req, next, who);
     return page(req, res, 403, 'forbidden');
   };
+}
+
+// --- the small gateway: it signs who is signed in, the app behind it checks the signature ---
+
+// X-Small-Auth for a request the gateway lets through: "<unix time>.<HMAC-SHA256 of user, method and time>", the same
+// as magic_link.py. The app behind the gateway checks it with the same SMALL_GATEWAY_KEY, so a request that didn't
+// come through the gateway (say, the app got a public address by mistake) can't claim to be someone.
+function gatewayAuth(key, user, method, now = Date.now() / 1000) {
+  const moment = Math.floor(now);
+  return `${moment}.${crypto.createHmac('sha256', key).update(`small-gateway|${user}|${method}|${moment}`).digest('base64url')}`;
+}
+
+// [user, method] if X-Small-Auth is the gateway's signature of them, made within GATEWAY_TTL; otherwise null.
+function gatewayIdentity(key, user, method, auth, now = Date.now() / 1000) {
+  const moment = String(auth || '').split('.')[0];
+  if (!key || !/^\d+$/.test(moment)) return null;
+  if (!(now - GATEWAY_TTL <= Number(moment) && Number(moment) <= now + CLOCK_SKEW)) return null;
+  return safeEqual(gatewayAuth(key, user, method, Number(moment)), String(auth)) ? [user, method] : null;
 }
 
 // --- single sign-on (OpenID Connect) ---
@@ -984,5 +1039,7 @@ module.exports.pickLang = pickLang;
 module.exports.identity = identity;
 module.exports.ssoProviders = ssoProviders;
 module.exports.SsoError = SsoError;
+module.exports.gatewayAuth = gatewayAuth;
+module.exports.gatewayIdentity = gatewayIdentity;
 // The middleware calls magicLink.sendLoginMail, so tests can intercept sending the email.
 module.exports.sendLoginMail = sendLoginMail;

@@ -719,3 +719,48 @@ test('SESSIONS_REVOKED: an address, a domain, everyone; new sign-ins work', asyn
     s.close();
   }
 });
+
+// --- Who is signed in, and the app behind the small gateway ---
+
+function serveWhoami(options) {
+  const guard = magicLink(options);
+  const server = http.createServer((req, res) => guard(req, res, () => res.end(JSON.stringify({
+    user: req.magicLinkUser, method: req.magicLinkMethod, smallUser: req.headers['x-small-user'] ?? null }))));
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
+}
+
+test('the app learns who is signed in; nobody else can claim the gateway headers', async (t) => {
+  const s = await serveWhoami({ tokens: 'bob:tok-b,tok-shared', requestUrl: '' });
+  t.after(() => s.close());
+  const port = s.address().port;
+  const as = (token, extra = {}) => request(port, { headers: { cookie: 'small_access=' + crypto.createHmac('sha256', token).update('magic-link-cookie').digest('hex'), ...extra } });
+  assert.deepEqual(JSON.parse((await as('tok-b')).body), { user: 'bob', method: 'link', smallUser: null });
+  assert.equal(JSON.parse((await as('tok-shared')).body).user, '');
+  assert.equal(JSON.parse((await as('tok-b', { 'x-small-user': 'boss@company.com' })).body).smallUser, null);
+});
+
+test('behind the small gateway only its signature counts', async (t) => {
+  const log = mock.method(console, 'log', () => {});
+  t.after(() => log.mock.restore());
+  const s = await serveWhoami({ tokens: '', emails: '', gatewayKey: 'gateway-key' });
+  t.after(() => s.close());
+  assert.ok(log.mock.calls.some((c) => String(c.arguments[0]).includes('за шлюзом small')));
+  assert.ok(!log.mock.calls.some((c) => String(c.arguments[0]).includes('доступ закрыт для всех')));
+  const port = s.address().port;
+  const signed = (user, method, key = 'gateway-key', now) => ({ 'x-small-user': user, 'x-small-method': method,
+    'x-small-auth': magicLink.gatewayAuth(key, user, method, now) });
+  const ok = await request(port, { headers: signed('ivan@company.com', 'google') });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(JSON.parse(ok.body), { user: 'ivan@company.com', method: 'google', smallUser: 'ivan@company.com' });
+  for (const headers of [{}, signed('ivan@company.com', 'google', 'forged'),
+    { ...signed('ivan@company.com', 'google'), 'x-small-user': 'boss@company.com' },
+    signed('ivan@company.com', 'google', 'gateway-key', Date.now() / 1000 - 25 * 3600)]) {
+    const res = await request(port, { headers });
+    assert.equal(res.status, 403, JSON.stringify(headers));
+    assert.match(res.body, /Откройте приложение по его адресу/);
+  }
+  assert.equal((await request(port, { path: '/?token=anything' })).status, 403);
+  // The same signature as magic_link.py.
+  assert.equal(magicLink.gatewayAuth('k', 'ivan@company.com', 'email', 1000), '1000.ZrBSpSZFSwHxn5XA3H2cLNHOzS5bnkoWx-3A0rQCdWY');
+  assert.deepEqual(magicLink.gatewayIdentity('k', '', 'link', magicLink.gatewayAuth('k', '', 'link', 1000), 1000), ['', 'link']);
+});

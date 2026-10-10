@@ -32,7 +32,8 @@ def cmd_destroy(args):
         raise CliError(tr("project %s not found in Railway (%s). If it is already deleted, delete %s manually",
                           "проект %s не найден в Railway (%s). Если он уже удалён, удалите %s вручную")
                        % (state["projectId"], e, root / STATE_FILE)) from None
-    own_ids = {state["serviceId"]} | {db["serviceId"] for db in state.get("databases", [])}
+    own_ids = ({state["serviceId"]} | {db["serviceId"] for db in state.get("databases", [])}
+               | ({state["gateway"]["serviceId"]} if (state.get("gateway") or {}).get("serviceId") else set()))
     own = [s for s in services if s["id"] in own_ids]
     others = [s["name"] for s in services if s["id"] not in own_ids]
     if others:

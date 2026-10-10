@@ -30,7 +30,8 @@ of users, not for an app that five colleagues open twice a week.
 
 - **One command to ship.** `small deploy` packs a folder, builds it on [Railway](https://railway.com) and prints an
   HTTPS URL — about 45 seconds for a small app.
-- **Private by default.** Every app starts behind an invite-only login. There is no public URL to leak.
+- **Private by default — any app.** A small template, or any folder in any language: an app without sign-in of
+  its own gets small's gateway in front of it before it ever has an address. There is no public URL to leak.
 - **Shared like a Google Doc.** `small access add ivan@company.com` — Ivan signs in with his work Google or
   Microsoft account, or with a one-time link sent to his email. Revoke him in seconds; nobody else is affected.
 
@@ -96,6 +97,7 @@ between English and Russian by browser language.
 | | |
 |---|---|
 | **Deploy** | `small deploy` — project, service, build, HTTPS domain and a short `<name>.up.railway.app` address |
+| **Gateway** | `small gateway on` — sign-in in front of any app (Go, Rails, Jupyter, a Dockerfile…), websockets included, no code changes; the app keeps no public address |
 | **Access by email** | `small access add ivan@company.com` or `@company.com`; `small access revoke` closes even open sessions |
 | **Sign in with Google / Microsoft** | `small sso google`, `small sso microsoft` — OpenID Connect with PKCE; checks the credentials before saving |
 | **Personal invite links** | `small access add bob` — a token per person, when email is not an option |
@@ -128,6 +130,17 @@ flowchart LR
 The protection lives in [`magic-link`](magic-link/README.md): a WSGI/ASGI middleware for Python (Flask, Django,
 FastAPI, Starlette) and a middleware for Node.js (Express, plain `http`). `small init` puts it into every template.
 
+For everything else there is the **gateway**: a second service with the app's address — [Caddy](https://caddyserver.com)
+with magic-link next to it — that checks every request and passes the ones it lets in to the app over Railway's
+private network. The app itself has no public address and needs no sign-in code; it learns who is signed in from the
+`X-Small-User` header, which the gateway signs.
+
+```mermaid
+flowchart LR
+    visitor(["Colleague"]) -- "https://app.up.railway.app" --> gateway["Gateway: Caddy + sign-in"]
+    gateway -- "signed X-Small-User, private network" --> app["Your app, no public address"]
+```
+
 ## Security model
 
 small's promise is narrow and checkable: only the addresses you list get past the sign-in page. The
@@ -141,6 +154,8 @@ small's promise is narrow and checkable: only the addresses you list get past th
   scanners don't burn them. Known and unknown addresses get the same answer; sending is rate-limited.
 - **Revocation that sticks.** Removing an address ends its sessions; `small access signout` ends them on every device
   without removing access. With a volume, used links stay used across restarts.
+- **A gateway that can't be walked around.** Behind it the app has no public address; the gateway strips any
+  `X-Small-*` header a visitor sends and signs the real identity, which magic-link in the app checks.
 - **No secrets in logs**, sign-in pages that can't be framed or run scripts, and a local dashboard that only
   `127.0.0.1` can reach.
 
@@ -150,7 +165,8 @@ Report a vulnerability privately — see [SECURITY.md](SECURITY.md).
 
 ```text
 small init [dir] [--template python-http|fastapi|node-http|streamlit]
-small deploy [dir] [--name NAME]                 # build and print the URL
+small deploy [dir] [--name NAME] [--public]      # build and print the URL; private unless --public
+small gateway [on | off]                         # sign-in in front of any app
 small open | link [--as NAME]                    # open the app as the owner / print an invite link
 small access [list | add EMAIL|@DOMAIN|NAME | revoke EMAIL|NAME | log | signout EMAIL|--all]
 small sso [google | microsoft | off]             # "Sign in with Google / Microsoft"
@@ -161,7 +177,7 @@ small db [list | add postgres | remove postgres]
 small volume [add [--mount /data]]               # a persistent disk
 small domain [list | add DOMAIN | remove DOMAIN]
 small sleep [on | off]
-small logs [-f] [--build]
+small logs [-f] [--build | --gateway]
 small dashboard
 small destroy                                    # remove the app and its databases
 ```
@@ -187,16 +203,16 @@ Full CLI reference: [small-cli/README.md](small-cli/README.md) · [по-русс
 - [x] Email sign-in for the Streamlit template
 - [x] Deploy and share straight from AI coding agents (MCP)
 - [x] Sign in with Google and Microsoft; access log; sign out on all devices; persistent volumes
-- [ ] Protection in front of the app (a gateway), for any language without code changes
+- [x] A gateway in front of any app, in any language, without code changes; private by default
 - [ ] Hosted mode — no Railway account needed
 - [ ] Company workspace: app catalog, owners, audit log
 
 ## Development
 
 ```bash
-cd small-cli   && python -m unittest discover -s tests     # 180 tests (+ real FastAPI/Streamlit when installed)
-cd magic-link  && python -m unittest test_magic_link       # 97 tests
-cd magic-link  && node --test                              # 31 tests
+cd small-cli   && python -m unittest discover -s tests     # 203 tests (+ real FastAPI/Streamlit when installed)
+cd magic-link  && python -m unittest test_magic_link       # 104 tests
+cd magic-link  && node --test                              # 33 tests
 ```
 
 GitHub Actions runs everything on Windows, macOS and Linux. See [CONTRIBUTING.md](CONTRIBUTING.md) and the

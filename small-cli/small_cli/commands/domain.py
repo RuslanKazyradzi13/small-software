@@ -3,6 +3,7 @@
 import argparse
 import re
 
+from .. import gateway
 from ..common import CliError, app_dir, linked_state, require_token, say
 from ..i18n import tr
 from ..railway import Railway
@@ -51,7 +52,8 @@ def normalize(domain):
 
 
 def ids(state):
-    return state["projectId"], state["environmentId"], state["serviceId"]
+    """The service that has the public address: behind the gateway, the gateway."""
+    return state["projectId"], state["environmentId"], gateway.public_service(state)
 
 
 def cmd_domain_list(args):

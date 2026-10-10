@@ -47,7 +47,7 @@ st.set_page_config(page_title="small · Streamlit", page_icon="🚀", layout="wi
 GATE_SETTINGS = ("ACCESS_TOKEN", "ACCESS_EMAILS", "SESSION_SECRET", "ACCESS_REQUEST_URL", "ACCESS_LANG",
                  "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET",
                  "MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET", "MICROSOFT_TENANT_ID", "SESSIONS_REVOKED",
-                 "ACCESS_DB", "RAILWAY_VOLUME_MOUNT_PATH")
+                 "ACCESS_DB", "RAILWAY_VOLUME_MOUNT_PATH", "SMALL_GATEWAY_KEY")
 
 # Streamlit-only labels. Everything else comes from magic_link's MESSAGES and UI, in the visitor's language.
 LABELS = {
@@ -182,6 +182,8 @@ def _screen(gate, lang, kind, email=""):
     with center:
         st.markdown("## %s %s" % (icon, title))
         st.write(text)
+        if kind == "gateway":
+            return False
         if kind == "confirm":
             return st.button(gate.label("sign_in", lang), type="primary", key="small_sign_in")
         if kind == "check":
@@ -215,6 +217,8 @@ def require_access():
       * Personal invite links ?token=<ACCESS_TOKEN>: the token stays in the address, which is how access survives a
         page reload.
       * Streamlit is a single-page app, so the access screen is served with HTTP 200, not 403.
+      * Behind the small gateway (small gateway on, SMALL_GATEWAY_KEY) the gateway signs people in, with an HttpOnly
+        cookie, and checks the websocket too; here only its signature on the connection is checked.
     ACCESS_TOKEN — comma-separated tokens, optionally named: "alice:token1,bob:token2" (as `small access` keeps them);
     ACCESS_REQUEST_URL — where the "Request access" button leads when sign-in by email is off.
     """
@@ -222,6 +226,21 @@ def require_access():
     headers = st.context.headers  # sent when the page opened: IP (X-Forwarded-For), Host, language
     lang = gate.lang(headers)
     state = st.session_state
+    if gate.behind_gateway:
+        name = state.get("small_gateway_user")
+        if name is None:
+            name = gate.gateway_user(headers)  # the headers of this session's connection, signed by the gateway
+            if name is None:
+                _screen(gate, lang, "gateway")
+                st.stop()
+            state.small_gateway_user = name
+        with st.sidebar:  # the gateway's own pages sign people out: a top-level link to them
+            if name:
+                st.caption(LABELS[lang]["signed_in"] % _md(name))
+            st.markdown('<a href="/_access/logout" target="_self">%s</a>' % html.escape(LABELS[lang]["sign_out"]),
+                        unsafe_allow_html=True)
+        return name
+
     if state.get("access_granted"):  # a personal link was accepted earlier in this session
         return state.get("access_name", "")
 

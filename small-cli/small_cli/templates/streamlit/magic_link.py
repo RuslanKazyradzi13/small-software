@@ -17,6 +17,12 @@ address becomes an access request.
     to the same address without the token. The link works like a password: anyone it is forwarded to gets in.
 The browser remembers a sign-in for 30 days. Without access: a 403 page with the sign-in options (if ACCESS_EMAILS is
 set) or a "Request access" button. Pages and emails are in Russian or English, depending on the browser language.
+The app learns who is signed in from environ["magic_link.user"] (WSGI) or scope["magic_link.user"] (ASGI), and how
+from "magic_link.method": "email", "google", "microsoft" or "link".
+
+Behind the small gateway (small gateway on) the gateway does all of the above, and this file in the app only checks
+that a request came through it: SMALL_GATEWAY_KEY set means "trust the gateway's signed X-Small-User, X-Small-Method
+and X-Small-Auth headers, and nothing else".
 Sign-ins, refusals and access requests are logged as single-line JSON (Railway shows them as structured logs,
 `small access log` reads them).
 
@@ -49,6 +55,8 @@ Environment variables:
                         email sign-in. If unset, the request is printed to the log as an [access-request] line
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
                         access requests reach the owner in Telegram (set up with: small notify telegram)
+    SMALL_GATEWAY_KEY   the app is behind the small gateway: let in only requests it signed with this key (small
+                        gateway on sets it); the variables above then belong to the gateway
 """
 
 import asyncio
@@ -82,6 +90,8 @@ SSO_PATH = "/_access/sso/"                # /_access/sso/google starts single si
 SSO_CALLBACK = "/_access/sso/callback"    # the redirect URI to register with Google and Microsoft
 SSO_TTL = 10 * 60                         # how long a started single sign-on may take
 CLOCK_SKEW = 5 * 60                       # leeway for the provider's clock when checking ID token times
+GATEWAY_TTL = 24 * 3600                   # how long the gateway's signature on a request stays valid
+GATEWAY_HEADERS = ("x-small-user", "x-small-method", "x-small-auth")  # what the small gateway adds for the app
 # How many sign-in emails can be requested within 15 minutes: per address and per IP.
 LIMIT_PER_EMAIL, LIMIT_PER_IP, LIMIT_WINDOW = 3, 10, 15 * 60
 
@@ -128,6 +138,8 @@ MESSAGES = {
                        "Этот аккаунт не подтверждает, что адрес %s принадлежит вашей организации. "
                        "Войдите рабочим аккаунтом."),
         "sso_failed": ("&#9888;&#65039;", "Не удалось войти", "Вход не завершился. Попробуйте ещё раз."),
+        "gateway": ("&#128274;", "Откройте приложение по его адресу",
+                    "Это приложение открывается только через свой адрес, где проверяется вход."),
     },
     "en": {
         "forbidden": ("&#128274;", "Invitation only", "This page opens only with an invitation link from its owner."),
@@ -152,6 +164,8 @@ MESSAGES = {
                        "This account doesn't confirm that %s belongs to your organization. "
                        "Sign in with your work account."),
         "sso_failed": ("&#9888;&#65039;", "Sign-in failed", "Sign-in didn't complete. Please try again."),
+        "gateway": ("&#128274;", "Open the app at its address",
+                    "This app opens only through its own address, where sign-in is checked."),
     },
 }
 
@@ -361,6 +375,36 @@ def _exchange_code(provider, code, redirect_uri, verifier):
     return claims
 
 
+# --- the small gateway: it signs who is signed in, the app behind it checks the signature ---
+
+def gateway_auth(key, user, method, now=None):
+    """X-Small-Auth for a request the gateway lets through: "<unix time>.<HMAC-SHA256 of user, method and time>".
+    The app behind the gateway checks it with the same SMALL_GATEWAY_KEY, so a request that didn't come through the
+    gateway (say, the app got a public address by mistake) can't claim to be someone."""
+    moment = int(time.time() if now is None else now)
+    return "%d.%s" % (moment, _b64(hmac.new(key.encode("utf-8"), ("small-gateway|%s|%s|%d" % (user, method, moment))
+                                            .encode("utf-8"), hashlib.sha256).digest()))
+
+
+def gateway_identity(key, user, method, auth, now=None):
+    """(user, method) if X-Small-Auth is the gateway's signature of them, made within GATEWAY_TTL; otherwise None."""
+    moment, _, _ = (auth or "").partition(".")
+    if not (key and moment.isdigit() and isinstance(user, str) and isinstance(method, str)):
+        return None
+    now = time.time() if now is None else now
+    if not now - GATEWAY_TTL <= int(moment) <= now + CLOCK_SKEW:
+        return None
+    expected = gateway_auth(key, user, method, int(moment))
+    return (user, method) if hmac.compare_digest(expected.encode("utf-8"), auth.encode("utf-8", "replace")) else None
+
+
+class _Pass:
+    """dispatch's answer for a request that may go on to the app: who is signed in and how."""
+
+    def __init__(self, user, method):
+        self.user, self.method = user, method
+
+
 # --- sign-in state: used links, rate limits, "sign out on all devices" ---
 
 class _MemoryStore:
@@ -482,12 +526,13 @@ def open_store(path=None):
 class _Gate:
     """Logic shared by the WSGI and ASGI versions: who may get in, cookies, emails, sign-on, pages, logs."""
 
-    def __init__(self, tokens, request_url, cookie_name, max_age, emails=None, secret=None):
+    def __init__(self, tokens, request_url, cookie_name, max_age, emails=None, secret=None, gateway_key=None):
+        self.gateway_key = os.environ.get("SMALL_GATEWAY_KEY", "").strip() if gateway_key is None else gateway_key
         self.entries = parse_tokens(os.environ.get("ACCESS_TOKEN", "") if tokens is None else tokens)
         self.cookies = [(name, _cookie_value(token)) for name, token in self.entries]
         self.emails = parse_emails(os.environ.get("ACCESS_EMAILS", "") if emails is None else emails)
         secret = os.environ.get("SESSION_SECRET", "").strip() if secret is None else secret
-        if self.emails and not secret:
+        if self.emails and not secret and not self.gateway_key:
             _log(_for_owner("[magic-link] SESSION_SECRET is not set: everyone will have to sign in again after a restart",
                             "[magic-link] SESSION_SECRET не задан: после перезапуска приложения всем придётся войти заново"))
         self.secret = (secret or secrets.token_hex(32)).encode("utf-8")
@@ -500,15 +545,18 @@ class _Gate:
         self.sso = sso_providers()
         self.revoked = parse_revoked(os.environ.get("SESSIONS_REVOKED", ""))
         self.store = open_store()
-        if not self.entries and not self.emails:
+        if self.gateway_key:
+            _log(_for_owner("[magic-link] behind the small gateway: only requests it signed get in",
+                            "[magic-link] за шлюзом small: пускаются только запросы, подписанные шлюзом"))
+        elif not self.entries and not self.emails:
             _log(_for_owner("[magic-link] neither ACCESS_TOKEN nor ACCESS_EMAILS is set: nobody can get in",
                             "[magic-link] ACCESS_TOKEN и ACCESS_EMAILS не заданы: доступ закрыт для всех"))
-        if os.environ.get("MICROSOFT_CLIENT_ID", "").strip() and "microsoft" not in self.sso:
+        if os.environ.get("MICROSOFT_CLIENT_ID", "").strip() and "microsoft" not in self.sso and not self.gateway_key:
             _log(_for_owner("[magic-link] sign-in with Microsoft is off: it needs MICROSOFT_CLIENT_SECRET and "
                             "MICROSOFT_TENANT_ID (a GUID). Set it up: small sso microsoft",
                             "[magic-link] вход через Microsoft выключен: нужны MICROSOFT_CLIENT_SECRET и "
                             "MICROSOFT_TENANT_ID (GUID). Настроить: small sso microsoft"))
-        if self.emails and not _mail_mode() and not self.sso:
+        if self.emails and not _mail_mode() and not self.sso and not self.gateway_key:
             _log(_for_owner("[magic-link] email is not set up (RESEND_API_KEY or SMTP_URL): sign-in emails will not be "
                             "sent. Set it up: small mail",
                             "[magic-link] почта не настроена (RESEND_API_KEY или SMTP_URL): письма для входа не уйдут. "
@@ -517,7 +565,7 @@ class _Gate:
             _log(_for_owner("[magic-link] sign-in state is kept in %s", "[magic-link] состояние входа хранится в %s")
                  % self.store.path)
 
-    # --- shared handler: None means pass the request to the app, otherwise (status, headers, body) ---
+    # --- shared handler: _Pass means pass the request to the app, otherwise (status, headers, body) ---
 
     def wants_body(self, method, path):
         return method == "POST" and ((path == REQUEST_PATH and not self.request_url)
@@ -528,8 +576,11 @@ class _Gate:
         return path == SSO_CALLBACK
 
     def dispatch(self, method, base, path, path_bytes, query, cookie, ip, user_agent, host, https, body=b"",
-                 accept_language=""):
+                 accept_language="", gateway=("", "", "")):
         lang = pick_lang(accept_language, self.lang)
+        if self.gateway_key:  # behind the gateway it has checked everything: only its signature counts here
+            who = gateway_identity(self.gateway_key, *gateway)
+            return _Pass(*who) if who else self.respond(403, "gateway", base, lang=lang)
         if path == REQUEST_PATH and method == "POST" and not self.request_url:
             self.log_request(body, ip, user_agent, host)
             return self.respond(200, "sent", base, lang=lang)
@@ -553,8 +604,9 @@ class _Gate:
             return 302, [("Location", self.location(path_bytes, query)), ("Set-Cookie", self.set_cookie(token, https)),
                          ("Cache-Control", "no-store")], b""
 
-        if self.cookie_owner(cookie) is not None:
-            return None
+        who = self.identity(cookie)
+        if who is not None:
+            return _Pass(*who)
         return self.respond(403, "forbidden", base, lang=lang)
 
     def respond(self, status, kind, base, headers=(), lang=DEFAULT_LANG, **page):
@@ -572,6 +624,24 @@ class _Gate:
     def cookie_owner(self, cookie_header):
         """Who is signed in: a name from ACCESS_TOKEN ("" if unnamed), an email address, or None."""
         return self.session_owner(self.read_cookie(cookie_header, self.cookie_name))
+
+    def identity(self, cookie_header):
+        """Who is signed in and how: (address or ACCESS_TOKEN name, "email" / "google" / "microsoft" / "link"),
+        or None."""
+        value = self.read_cookie(cookie_header, self.cookie_name)
+        if isinstance(value, str) and value.startswith("e."):
+            session = self._session(value)
+            if session is None or not self.email_allowed(session[0]):
+                return None
+            return session
+        name = _owner(value, self.cookies) if value is not None else None
+        return None if name is None else (name, "link")
+
+    def connection_identity(self, cookie_header, gateway=("", "", "")):
+        """The same for a websocket: behind the gateway, its signature; otherwise the session cookie."""
+        if self.gateway_key:
+            return gateway_identity(self.gateway_key, *gateway)
+        return self.identity(cookie_header)
 
     @staticmethod
     def read_cookie(cookie_header, name):
@@ -592,6 +662,11 @@ class _Gate:
     def session_email(self, value):
         """The address of a valid session "e.<signed>" (not expired, not signed out), whether or not it still has
         access; otherwise None."""
+        session = self._session(value)
+        return session[0] if session else None
+
+    def _session(self, value):
+        """(address, sign-in method) of a valid session "e.<signed>", whether or not it still has access; or None."""
         data = self.unsign("session", value[2:]) if isinstance(value, str) and value.startswith("e.") else None
         email = data.get("e") if data else None
         if not (isinstance(email, str) and email):
@@ -599,7 +674,10 @@ class _Gate:
         # Sessions made before 0.8 don't say when they were issued: their expiry minus the lifetime does.
         issued = data.get("i")
         issued = issued if isinstance(issued, (int, float)) and not isinstance(issued, bool) else data["x"] - self.max_age
-        return email if issued > self.signed_out_at(email) else None
+        if issued <= self.signed_out_at(email):
+            return None
+        method = data.get("m")
+        return email, method if method in ("email", "google", "microsoft") else "email"
 
     def signed_out_at(self, email):
         """Sessions of this address issued at or before this Unix time are signed out (SESSIONS_REVOKED, the
@@ -934,12 +1012,12 @@ class _Gate:
 
 
 class MagicLink:
-    """WSGI middleware."""
+    """WSGI middleware. A request that gets through carries environ["magic_link.user"] and ["magic_link.method"]."""
 
     def __init__(self, app, tokens=None, request_url=None, cookie_name=COOKIE_NAME, max_age=COOKIE_MAX_AGE,
-                 emails=None, secret=None):
+                 emails=None, secret=None, gateway_key=None):
         self.app = app
-        self.gate = _Gate(tokens, request_url, cookie_name, max_age, emails, secret)
+        self.gate = _Gate(tokens, request_url, cookie_name, max_age, emails, secret, gateway_key)
 
     def __call__(self, environ, start_response):
         gate = self.gate
@@ -959,8 +1037,13 @@ class MagicLink:
             parse_qsl(environ.get("QUERY_STRING", ""), keep_blank_values=True), environ.get("HTTP_COOKIE", ""),
             _client_ip(forwarded, environ.get("REMOTE_ADDR")), environ.get("HTTP_USER_AGENT", ""),
             environ.get("HTTP_HOST", ""), _is_https(environ.get("HTTP_X_FORWARDED_PROTO"), environ.get("wsgi.url_scheme")),
-            body, environ.get("HTTP_ACCEPT_LANGUAGE", ""))
-        if result is None:
+            body, environ.get("HTTP_ACCEPT_LANGUAGE", ""),
+            tuple(environ.get("HTTP_" + name.upper().replace("-", "_"), "") for name in GATEWAY_HEADERS))
+        if isinstance(result, _Pass):
+            if not gate.gateway_key:  # nobody else may claim the gateway's headers
+                for name in GATEWAY_HEADERS:
+                    environ.pop("HTTP_" + name.upper().replace("-", "_"), None)
+            environ["magic_link.user"], environ["magic_link.method"] = result.user, result.method
             return self.app(environ, start_response)
         status, headers, payload = result
         start_response(STATUS[status], headers + [("Content-Length", str(len(payload)))])
@@ -968,21 +1051,32 @@ class MagicLink:
 
 
 class MagicLinkASGI:
-    """ASGI middleware (FastAPI, Starlette, Litestar...). A websocket without access is closed before accept (403)."""
+    """ASGI middleware (FastAPI, Starlette, Litestar...). A websocket without access is closed before accept (403).
+    A request that gets through carries scope["magic_link.user"] and scope["magic_link.method"]."""
 
     def __init__(self, app, tokens=None, request_url=None, cookie_name=COOKIE_NAME, max_age=COOKIE_MAX_AGE,
-                 emails=None, secret=None):
+                 emails=None, secret=None, gateway_key=None):
         self.app = app
-        self.gate = _Gate(tokens, request_url, cookie_name, max_age, emails, secret)
+        self.gate = _Gate(tokens, request_url, cookie_name, max_age, emails, secret, gateway_key)
+
+    def _let_in(self, scope, user, method):
+        """The scope the app gets: who is signed in, and without the gateway's headers unless they were checked."""
+        scope = dict(scope, **{"magic_link.user": user, "magic_link.method": method})
+        if not self.gate.gateway_key:
+            scope["headers"] = [(k, v) for k, v in scope.get("headers") or []
+                                if k.decode("latin-1").lower() not in GATEWAY_HEADERS]
+        return scope
 
     async def __call__(self, scope, receive, send):
         if scope["type"] not in ("http", "websocket"):  # lifespan and the rest: no check
             return await self.app(scope, receive, send)
         gate = self.gate
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
+        gateway = tuple(headers.get(name, "") for name in GATEWAY_HEADERS)
         if scope["type"] == "websocket":
-            if gate.cookie_owner(headers.get("cookie", "")) is not None:
-                return await self.app(scope, receive, send)
+            who = gate.connection_identity(headers.get("cookie", ""), gateway)
+            if who is not None:
+                return await self.app(self._let_in(scope, *who), receive, send)
             return await send({"type": "websocket.close", "code": 1008})
 
         method = scope.get("method", "GET")
@@ -1002,11 +1096,11 @@ class MagicLinkASGI:
             headers.get("cookie", ""), _client_ip(headers.get("x-forwarded-for"), client[0]),
             headers.get("user-agent", ""), headers.get("host", ""),
             _is_https(headers.get("x-forwarded-proto"), scope.get("scheme")), body[:4096],
-            headers.get("accept-language", ""))
+            headers.get("accept-language", ""), gateway)
         # The sign-on callback waits for the provider: in a thread, so the event loop keeps serving others.
         result = await asyncio.get_running_loop().run_in_executor(None, handle) if gate.is_slow(path) else handle()
-        if result is None:
-            return await self.app(scope, receive, send)
+        if isinstance(result, _Pass):
+            return await self.app(self._let_in(scope, result.user, result.method), receive, send)
         status, response_headers, payload = result
         await send({"type": "http.response.start", "status": status, "headers": [
             (k.lower().encode("latin-1"), v.encode("latin-1")) for k, v in response_headers
@@ -1032,12 +1126,13 @@ class MagicLinkGate:
         gate.everywhere_token(cookie_value)    # for a "Sign out on all devices" button, or None
         gate.sign_out_everywhere(token, headers)  # ends every session of that address
         gate.request_access(contact, headers)  # access request: to the log and to Telegram
+        gate.gateway_user(headers)             # behind the small gateway: who it let in, or None
     headers: the request headers (any Mapping, case-insensitive); IP, Host, User-Agent and language come from them.
     """
 
     def __init__(self, tokens=None, request_url=None, cookie_name=COOKIE_NAME, max_age=COOKIE_MAX_AGE,
-                 emails=None, secret=None):
-        self._gate = _Gate(tokens, request_url, cookie_name, max_age, emails, secret)
+                 emails=None, secret=None, gateway_key=None):
+        self._gate = _Gate(tokens, request_url, cookie_name, max_age, emails, secret, gateway_key)
         self.cookie_name, self.max_age = cookie_name, max_age
         self.state_cookie_name = self._gate.state_cookie_name
 
@@ -1045,6 +1140,17 @@ class MagicLinkGate:
     def emails(self):
         """Addresses and domains from ACCESS_EMAILS. Empty means no sign-in by address (email or sign-on)."""
         return frozenset(self._gate.emails)
+
+    @property
+    def behind_gateway(self):
+        """Whether the app is behind the small gateway (SMALL_GATEWAY_KEY): then use gateway_user, not the forms."""
+        return bool(self._gate.gateway_key)
+
+    def gateway_user(self, headers=None):
+        """Behind the small gateway: who it let in (address or ACCESS_TOKEN name, "" for the shared link), if the
+        request carries its valid signature; otherwise None. Without the gateway: always None."""
+        who = gateway_identity(self._gate.gateway_key, *(_header(headers, name) for name in GATEWAY_HEADERS))
+        return who[0] if who else None
 
     @property
     def request_url(self):

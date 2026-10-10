@@ -71,10 +71,10 @@ def register(sub):
 
 def prepare(root):
     """(state, redirect URI) of an app that can take single sign-on; otherwise CliError with what to do."""
-    problem = tokens.feature_problem(root)
+    state = load_state(root / STATE_FILE)
+    problem = tokens.feature_problem(root, state)
     if problem:
         raise CliError(problem)
-    state = load_state(root / STATE_FILE)
     uri = tokens.redirect_uri(root, state)
     if uri is None:
         raise CliError(tr("the app has no address yet, and Google and Microsoft need one to send people back to. "

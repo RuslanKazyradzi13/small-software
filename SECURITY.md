@@ -14,18 +14,25 @@ You will get an answer within 7 days. Once a fix is released, the report can be 
 
 | Version | Supported |
 |---|---|
-| 0.8.x | yes |
-| < 0.8 | no — please upgrade (`pip install -U small-software`, then copy the new `magic_link.py` / `magic-link.js` into your app) |
+| 0.9.x | yes |
+| < 0.9 | no — please upgrade (`pip install -U small-software`, then copy the new `magic_link.py` / `magic-link.js` into your app) |
 
 ## Threat model
 
 ### What is protected
 
 An app deployed with small runs on Railway at a public HTTPS address. Every request passes through `magic-link`
-(`magic_link.py` for Python, `magic-link.js` for Node.js, `MagicLinkGate` for Streamlit) **inside the app process**,
-before the app's own code. A request gets through only with a valid session of an address on the access list
-(`ACCESS_EMAILS`) or a cookie derived from a current invite token (`ACCESS_TOKEN`). Everything else — pages, API,
-`/docs`, websockets — gets a sign-in page or is closed. **Deny by default.**
+before the app's own code, in one of two places:
+
+- **The gateway** (`small gateway on`, and the default for an app without sign-in of its own): a separate service,
+  [Caddy](https://caddyserver.com) with `magic_link.py` next to it, holds the public address. The app has none: it is
+  reachable only over Railway's private network, and only the gateway sends it requests.
+- **Inside the app process**: `magic_link.py` (Python), `magic-link.js` (Node.js) or `MagicLinkGate` (Streamlit), as in
+  small's templates.
+
+A request gets through only with a valid session of an address on the access list (`ACCESS_EMAILS`) or a cookie derived
+from a current invite token (`ACCESS_TOKEN`). Everything else — pages, API, `/docs`, websockets — gets a sign-in page or
+is closed. **Deny by default.**
 
 ### What we trust
 
@@ -35,6 +42,8 @@ before the app's own code. A request gets through only with a valid session of a
 - **The mailbox**: for email sign-in links, whoever reads the inbox is treated as the owner of the address.
 - **The app's own code**: magic-link shares the process with it. A bug in the app (for example, rendering untrusted
   HTML) can undermine it.
+- **Caddy** (an exact version, updated through Dependabot) for proxying behind the gateway, and **Railway's private
+  network** between the gateway and the app.
 
 ### Threats and defenses
 
@@ -55,6 +64,9 @@ before the app's own code. A request gets through only with a valid session of a
 | Open redirects | Redirects go to the app's own paths only; leading slashes are collapsed. |
 | Clickjacking, injected scripts, cached pages | Sign-in pages send `X-Frame-Options: DENY` and `Content-Security-Policy: default-src 'none'; form-action 'self'; frame-ancestors 'none'`, contain no scripts, and are `Cache-Control: no-store`, `Referrer-Policy: no-referrer`. |
 | Secrets in logs, forged log lines | Tokens, links, codes, client secrets and API keys are never logged; the templates mask `token`, `t`, `code` and `state` in access logs. Sign-ins and requests are logged as one JSON object per line, so a visitor can't forge entries. |
+| Walking around the gateway | Behind it the app has no public address. The gateway drops every `X-Small-*` header a visitor sends and adds its own: who it is, how they signed in, and an HMAC-SHA256 signature of both with `SMALL_GATEWAY_KEY`, valid for 24 hours. magic-link in the app trusts that signature and nothing else, so even an app that gets a public address by mistake doesn't let anyone in. |
+| A gateway that points at itself | If Railway filled in the app's private address too early, the gateway refuses to start; a request the gateway has already sent on (`X-Small-Gateway`) is answered 508, never looped. |
+| Websockets past sign-in | Behind the gateway, a websocket upgrade goes through the same check as any request; without a session it is refused (403). |
 | The local dashboard reached from other sites or machines | `small dashboard` listens on `127.0.0.1` only, checks `Host`, `Origin` and `Sec-Fetch-Site`, needs a per-run key on every change, and can't be framed. |
 
 ### Limitations — what small does not protect against
@@ -62,15 +74,19 @@ before the app's own code. A request gets through only with a valid session of a
 - **People you let in.** Anyone on the list, anyone who controls a listed mailbox or account, and anyone holding a
   personal invite link (it is a bearer token, like a password) gets in until you revoke them.
 - **A compromised Railway account, Railway itself, or your computer.**
-- **The app's own vulnerabilities.** magic-link guards the door, not the app behind it. In the Streamlit template the
-  session cookie is written by JavaScript, so it is not `HttpOnly`: never render untrusted HTML there.
+- **The app's own vulnerabilities.** magic-link guards the door, not the app behind it. In the Streamlit template
+  without the gateway the session cookie is written by JavaScript, so it is not `HttpOnly`: never render untrusted HTML
+  there (behind the gateway the cookie is `HttpOnly`).
 - **No volume, no memory.** Without `small volume add`, used sign-in links, rate limits and "sign out on all devices"
   live in the process memory. After a restart, someone who already has a used link could use it again within its 15
   minutes; the button is not offered in this mode. `SESSIONS_REVOKED` (owner sign-outs and revocations) does not need a
   volume.
 - **Sessions are bearer cookies** for 30 days, not bound to a device or IP.
-- **Node.js websockets.** `magic-link.js` guards HTTP requests; a websocket upgrade (`server.on('upgrade')`) does not
-  pass through it, so an app that accepts websockets must check the session there itself.
+- **Node.js websockets without the gateway.** `magic-link.js` guards HTTP requests; a websocket upgrade
+  (`server.on('upgrade')`) does not pass through it, so such an app must check the session there itself — or sit
+  behind the gateway, which checks websockets too.
+- **Other services in the same Railway project** can reach the app over the private network, around the gateway. An
+  app behind the gateway that doesn't check `X-Small-Auth` trusts them; put only your own services there.
 - **Microsoft sign-in names are set by your tenant's admins.** Renaming a user changes which address signs in.
 - **Denial of service** is left to Railway's edge; small adds only the email limits.
 - **The access log** (`small access log`) is Railway's log: it is kept as long as your Railway plan keeps logs.
@@ -78,8 +94,11 @@ before the app's own code. A request gets through only with a valid session of a
 
 ## How it is tested
 
-- `magic_link.py`: 97 tests, `magic-link.js`: 31 tests, `small-cli`: 180 tests, run by GitHub Actions on Linux,
+- `magic_link.py`: 104 tests, `magic-link.js`: 33 tests, `small-cli`: 203 tests, run by GitHub Actions on Linux,
   macOS and Windows, with the Streamlit and FastAPI templates on the real frameworks.
+- The gateway image is built in CI and checked through the real Caddy: the sign-in page and its headers, the check
+  endpoint closed to visitors, spoofed `X-Small-*` headers, invite links, the signed identity the app gets, websockets
+  with and without a session, the loop guard.
 - Sign-on is tested against a local OpenID provider: tampered `aud`, `azp`, `exp`, `iat`, `nonce` and `iss`; tokens of
   another tenant; guests; personal Google accounts with a company address; a `state` from another browser; replayed
   answers; provider errors; the code exchange with PKCE.
@@ -90,7 +109,8 @@ before the app's own code. A request gets through only with a valid session of a
 
 In scope: bypassing sign-in (single sign-on, email links, invite links), forging or replaying sessions, links or
 sign-on answers, accepting an address the provider doesn't vouch for, leaking tokens, links, codes or secrets into
-logs or output, redirecting sign-in to another host, the local dashboard being reachable from other machines or sites.
+logs or output, redirecting sign-in to another host, reaching an app behind the gateway around it or claiming an
+identity it didn't sign, the local dashboard being reachable from other machines or sites.
 
 Out of scope: issues in Railway, Google or Microsoft themselves, and findings that need access to the owner's computer
 or Railway account.

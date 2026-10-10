@@ -4,6 +4,7 @@ next small deploy would bring back the old values from small.json."""
 import argparse
 import json
 
+from .. import gateway
 from ..common import CliError, app_dir, is_linked, require_token, say
 from ..config import CONFIG_FILE, ENV_NAME_RE, STATE_FILE, load_config, load_state
 from ..i18n import tr
@@ -50,7 +51,9 @@ def change_env(root, set_vars=None, unset=(), deploy=True, railway_only=None):
     """Changes variables in Railway (if the app is deployed) and in small.json, so that they don't diverge.
 
     Railway first: if it refuses, small.json stays as it was. railway_only are variables that small manages
-    itself and doesn't write to small.json (e.g. PUBLIC_URL). Returns True if Railway was touched.
+    itself and doesn't write to small.json (e.g. PUBLIC_URL). Behind the gateway, each variable goes to its service
+    (sign-in variables to the gateway, see gateway.services_for), and only the services that changed restart.
+    Returns True if Railway was touched.
     """
     set_vars, unset = dict(set_vars or {}), list(unset)
     config_path, state = root / CONFIG_FILE, load_state(root / STATE_FILE)
@@ -59,16 +62,26 @@ def change_env(root, set_vars=None, unset=(), deploy=True, railway_only=None):
 
     if is_linked(state):
         api = Railway(require_token())
-        ids = (state["projectId"], state["environmentId"], state["serviceId"])
-        existing = api.service_variables(*ids)
-        upsert = dict(set_vars, **(railway_only or {}))
-        if upsert:
-            api.upsert_variables(*ids, upsert)
-        for name in unset:
-            if name in existing:
-                api.delete_variable(*ids, name)
+        services = [state["serviceId"]] + ([state["gateway"]["serviceId"]] if gateway.is_on(state) else [])
+        changed = []
+        for service_id in services:
+            mine = {k: v for k, v in set_vars.items() if service_id in gateway.services_for(k, state)}
+            if service_id == gateway.public_service(state):
+                mine.update(railway_only or {})  # small's own (the public address): for the service that has it
+            gone = [name for name in unset if service_id in gateway.services_for(name, state)]
+            if len(services) > 1 and not (mine or gone):
+                continue
+            ids = (state["projectId"], state["environmentId"], service_id)
+            existing = api.service_variables(*ids)
+            if mine:
+                api.upsert_variables(*ids, mine)
+            for name in gone:
+                if name in existing:
+                    api.delete_variable(*ids, name)
+            changed.append(service_id)
         if deploy:
-            api.redeploy(state["serviceId"], state["environmentId"])
+            for service_id in changed or [state["serviceId"]]:
+                api.redeploy(service_id, state["environmentId"])
 
     env = raw.setdefault("env", {})
     env.update(set_vars)

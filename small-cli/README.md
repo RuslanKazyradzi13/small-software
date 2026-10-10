@@ -291,7 +291,7 @@ share apps itself: *"Deploy this folder and give ivan@company.com access."*
 ## `small deploy`
 
 ```
-small deploy [folder] [--name NAME] [--workspace ID] [--port N] [-m MESSAGE] [--new] [--no-wait] [--timeout SEC]
+small deploy [folder] [--name NAME] [--workspace ID] [--port N] [-m MESSAGE] [--public] [--new] [--no-wait] [--timeout SEC]
 ```
 
 | Flag | What it does |
@@ -300,12 +300,49 @@ small deploy [folder] [--name NAME] [--workspace ID] [--port N] [-m MESSAGE] [--
 | `--workspace` | workspace ID if the account has several (or `RAILWAY_WORKSPACE_ID`) |
 | `--port` | port for the public domain if the app does not listen on `$PORT` |
 | `-m`, `--message` | deploy message shown in Railway |
+| `--public` | an app without sign-in of its own: deploy it open to anyone, without the gateway (see `small gateway`) |
 | `--new` | create a new project even if the folder has been deployed before |
 | `--no-wait` | print the URL right away without waiting for the build |
 | `--timeout` | how many seconds to wait for the build (default 900) |
 
 Progress goes to stderr and the final URL to stdout: `URL=$(small deploy)`.
 Exit codes: `0` success, `1` error or failed build (the last log lines are printed), `130` interrupted.
+
+## `small gateway`: sign-in in front of any app
+
+```
+small gateway [on [--port N] | off [--yes]]          # no subcommand: the status
+```
+
+The gateway protects an app that has no sign-in of its own — any language, any framework, a Dockerfile — without
+changing its code. It is a second service in the app's Railway project, `<app>-gateway`: [Caddy](https://caddyserver.com)
+takes every request, and magic-link next to it decides who gets in (Google and Microsoft sign-on, email links, invite
+links, all `small access` / `small sso` / `small mail` settings). Requests it lets in go on to the app over Railway's
+private network; the app itself has no public address.
+
+- **Private by default.** The first `small deploy` of a folder without `magic_link.py` / `magic-link.js` sets the
+  gateway up before the app ever gets an address, and puts your own invite link in `small.json` (`small open`).
+  `small deploy --public` deploys such an app open to anyone instead; redeploying an app that is open prints a warning.
+- **`on`** for an app already deployed: creates the gateway, moves the sign-in variables to it, moves the address
+  (keeping its name), and restarts the app without a public address. The app must listen on `$PORT` (small sets it to
+  `8080` if it isn't set) or pass `--port`. A custom domain has to be removed first and added back after; it then
+  points to the gateway.
+- **Who is signed in.** The gateway adds `X-Small-User` (the address, or the invite-link name), `X-Small-Method`
+  (`email`, `google`, `microsoft`, `link`) and `X-Small-Auth`, an HMAC signature of both with `SMALL_GATEWAY_KEY`, which
+  the app gets as a Railway reference. Any `X-Small-*` header a visitor sends is dropped. magic-link in the app (0.9+)
+  trusts that signature and nothing else, so an app that keeps its own sign-in code works behind the gateway too.
+- **Websockets** go through the same check. For Streamlit this means an `HttpOnly` session cookie set by the gateway.
+- **Where things live.** Sign-in variables (`ACCESS_*`, `SESSION_SECRET`, `GOOGLE_*`, `MICROSOFT_*`,
+  `SESSIONS_REVOKED`…) belong to the gateway; mail and Telegram variables go to both; everything else stays the
+  app's. `small env`, `small access`, `small sso`, `small mail` and `small deploy` route them for you, and restart only
+  the service that changed.
+- **The rest follows:** `small access log` reads the gateway's log, `small logs --gateway` shows it, `small sleep`
+  puts both to sleep (the first request wakes both, a few seconds), `small domain` attaches to the gateway,
+  `small volume add --gateway` keeps sign-in state across the gateway's restarts, `small destroy` removes both.
+- **`small deploy`** also rebuilds the gateway when it was built by an older small.
+- **`off`** gives the address and the variables back to the app and deletes the gateway. If the app has no sign-in of
+  its own, small asks first (or `--yes`): without the gateway anyone with the address gets in.
+- **Cost:** one more small service. Caddy and the sign-in server idle at a few tens of MB; with sleep on, both sleep.
 
 ## After deploy
 
@@ -323,10 +360,11 @@ small mail [resend | smtp [--from FROM] [--to TO] | log | off]  # emails for sig
 small notify [telegram [--chat-id ID] | off]        # access requests to Telegram
 small env [list [--values] | set K=V ... | unset K ...] [--no-deploy]
 small db [list | add postgres | remove postgres [--yes]]
-small volume [add [--mount /data]]                  # persistent disk; no argument shows the status
+small volume [add [--mount /data]] [--gateway]      # persistent disk; no argument shows the status
+small gateway [on [--port N] | off [--yes]]          # sign-in in front of any app (see above)
 small domain [list | add DOMAIN [--port N] | remove DOMAIN]
 small sleep [on | off]                              # sleep mode; no argument shows the status
-small logs [folder] [--build] [-n N] [-f]            # log of the latest deploy
+small logs [folder] [--build | --gateway] [-n N] [-f]  # log of the latest deploy
 small destroy [folder] [--yes]                       # remove from Railway
 ```
 
@@ -473,7 +511,7 @@ then takes effect on the next deploy.
   that it disappears from Railway too.
 
 **`small logs`** shows the log of the latest deploy.
-- **Which log.** The app log by default, the build log with `--build`. `-n` sets the number of lines (default 100).
+- **Which log.** The app log by default, the build log with `--build`, the gateway's with `--gateway`. `-n` sets the number of lines (default 100).
 - **Follow mode.** `-f` appends new lines every 2 seconds; `Ctrl+C` exits.
 - **Format.** Every line is printed with its local time. Requests from the **Request access** button show up as
   `[access-request] ...`, and they are easy to filter: `small logs | findstr access-request`.
@@ -639,4 +677,5 @@ network, timeout, wrong token, garbage status, no token in the response):
 ## Limitations
 
 - Only the root `.gitignore`/`.railwayignore` are read; nested ones are ignored.
-- One service is created, in the `production` environment. Databases: Postgres only (`small db`).
+- One service is created (two with the gateway), in the `production` environment. Databases: Postgres only
+  (`small db`).

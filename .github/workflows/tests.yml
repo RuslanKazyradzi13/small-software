@@ -191,3 +191,25 @@ jobs:
       - name: Node.js
         working-directory: magic-link
         run: node --test
+
+  gateway:
+    name: gateway · Caddy and magic_link in Docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the gateway image
+        run: docker build -t small-gateway small-cli/small_cli/templates/gateway
+      - name: Start an echo app and the gateway in front of it
+        run: |
+          docker network create small
+          docker run -d --name app --network small -v "$PWD/small-cli/tests/gateway_echo.py:/echo.py:ro" \
+            python:3.12-alpine python -u /echo.py
+          docker run -d --name gateway --network small -p 8080:8080 -e PORT=8080 -e UPSTREAM=http://app:8080 \
+            -e SMALL_GATEWAY_KEY=ci-key -e ACCESS_TOKEN=bob:tok-b -e SESSION_SECRET=ci-secret small-gateway
+      - name: Smoke test through the real Caddy
+        run: python3 small-cli/tests/gateway_smoke.py http://127.0.0.1:8080 ci-key
+      - name: Container logs
+        if: always()
+        run: |
+          docker logs gateway
+          docker logs app

@@ -57,8 +57,11 @@ TOOLS = [
         "name": "deploy_app",
         "title": "Deploy an app",
         "description": "Deploy a folder to Railway and return its HTTPS URL. Works for a folder from init_app or any "
-                       "existing app (app.py, main.py, requirements.txt, package.json, Dockerfile...). Usually takes "
-                       "1-3 minutes. The app stays private: only people added with share_app can open it.",
+                       "existing app in any language (app.py, main.py, requirements.txt, package.json, Dockerfile...). "
+                       "Usually takes 1-3 minutes. The app stays private: only people added with share_app can open "
+                       "it. An app without sign-in of its own gets small's gateway in front of it on the first "
+                       "deploy, so it needs no code changes; it can read who is signed in from the X-Small-User "
+                       "request header.",
         "inputSchema": {"type": "object", "properties": {
             "path": PATH,
             "wait": {"type": "boolean", "description": "Wait for the build to finish (default: true). "

@@ -249,7 +249,8 @@ class DeployTest(unittest.TestCase):
     def deploy(self, server, *extra, name="Demo App"):
         env = {"RAILWAY_API_TOKEN": TOKEN, "SMALL_API_URL": server.url}
         name_args = ["--name", name] if name else []
-        return run(["deploy", self.app, *name_args, "--interval", "0", *extra], env)
+        # --public: these tests are about deploying; private by default (the gateway) has its own, in test_gateway
+        return run(["deploy", self.app, *name_args, "--interval", "0", "--public", *extra], env)
 
     def test_first_deploy_creates_everything_and_prints_url(self):
         server = MockRailway()
@@ -343,9 +344,21 @@ class DeployTest(unittest.TestCase):
             self.assertIsNone(token_from_env())
         server = MockRailway()
         self.addCleanup(server.close)
-        code, _, err = run(["deploy", self.app, "--interval", "0"],
+        code, _, err = run(["deploy", self.app, "--interval", "0", "--public"],
                            {"RAILWAY_API_TOKEN": "<%s>" % TOKEN, "SMALL_API_URL": server.url})
         self.assertEqual(code, 0, err)  # the mock only lets in "Bearer test-token", so the angle brackets were stripped
+
+    def test_a_refused_service_leaves_no_empty_project(self):
+        server = MockRailway()
+        self.addCleanup(server.close)
+        original = server.graphql
+        server.graphql = lambda payload: ({"errors": [{"message": "You've hit the service creation limit"}]}
+                                          if "serviceCreate" in payload["query"] else original(payload))
+        code, _, err = self.deploy(server)
+        self.assertEqual(code, 1)
+        self.assertIn("service creation limit", err)
+        self.assertEqual(server.calls[-1], "projectDelete")
+        self.assertFalse(Path(self.app, ".small.json").exists())
 
     def test_bad_token(self):
         server = MockRailway()
@@ -383,7 +396,7 @@ class ConfigFileTest(unittest.TestCase):
         Path(self.app, "small.json").write_text(raw if raw is not None else json.dumps(config), encoding="utf-8-sig")
 
     def deploy(self, server, *extra):
-        return run(["deploy", self.app, "--interval", "0", *extra],
+        return run(["deploy", self.app, "--interval", "0", "--public", *extra],
                    {"RAILWAY_API_TOKEN": TOKEN, "SMALL_API_URL": server.url})
 
     def server(self, **kwargs):
@@ -692,7 +705,8 @@ class InitTest(unittest.TestCase):
     @unittest.skipUnless(MAGIC_LINK_DIR.is_dir(), "нет папки magic-link с исходниками middleware")
     def test_template_middleware_matches_source(self):
         for template, name in (("python-http", "magic_link.py"), ("fastapi", "magic_link.py"),
-                               ("streamlit", "magic_link.py"), ("node-http", "magic-link.js")):
+                               ("streamlit", "magic_link.py"), ("gateway", "magic_link.py"),
+                               ("node-http", "magic-link.js")):
             self.assertEqual((TEMPLATES_DIR / template / name).read_bytes(), (MAGIC_LINK_DIR / name).read_bytes(),
                              "%s в шаблоне %s разошёлся с magic-link/%s" % (name, template, name))
 

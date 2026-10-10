@@ -8,6 +8,7 @@ stay used after a restart, and "Sign out on all devices" works.
 import argparse
 import re
 
+from .. import gateway
 from ..common import CliError, app_dir, linked_state, require_token, say
 from ..i18n import tr
 from ..railway import Railway
@@ -29,6 +30,8 @@ def register(sub):
                                       "простоя, две копии приложения не могут делить диск.") % DEFAULT_MOUNT)
     v.add_argument("-C", "--path", default=".", help=tr("app folder (default: current folder)",
                                                         "папка приложения (по умолчанию текущая)"))
+    v.add_argument("--gateway", action="store_true", help=tr("the gateway's volume (small gateway on): sign-in state",
+                                                             "том шлюза (small gateway on): состояние входа"))
     v.set_defaults(func=cmd_volume_status)
     volume_sub = v.add_subparsers(dest="volume_command", metavar="<add>")
     va = volume_sub.add_parser("add", help=tr("create a volume: small volume add [--mount /data]",
@@ -37,16 +40,28 @@ def register(sub):
                                                               "где приложение его видит (по умолчанию %s)")
                     % DEFAULT_MOUNT)
     va.add_argument("-C", "--path", default=argparse.SUPPRESS, help=tr("app folder", "папка приложения"))
+    va.add_argument("--gateway", action="store_true", default=argparse.SUPPRESS,
+                    help=tr("for the gateway (small gateway on): sign-in state survives its restarts",
+                            "для шлюза (small gateway on): состояние входа переживает его перезапуски"))
     va.add_argument("--no-deploy", action="store_true",
                     help=tr("don't restart the app (the volume appears on the next deploy)",
                             "не перезапускать приложение (том появится при следующем деплое)"))
     va.set_defaults(func=cmd_volume_add)
 
 
+def target(args, state):
+    """The app's service, or with --gateway the gateway's."""
+    if not getattr(args, "gateway", False):
+        return state["serviceId"]
+    if not gateway.is_on(state):
+        raise CliError(tr("the app has no gateway (small gateway on)", "у приложения нет шлюза (small gateway on)"))
+    return state["gateway"]["serviceId"]
+
+
 def cmd_volume_status(args):
     root = app_dir(args.path)
     state = linked_state(root)
-    volume = Railway(require_token()).service_volume(state["environmentId"], state["serviceId"])
+    volume = Railway(require_token()).service_volume(state["environmentId"], target(args, state))
     if volume is None:
         say(tr("No volume: files and sign-in state are lost on every deploy and restart. Add one: small volume add",
                "Тома нет: файлы и состояние входа пропадают при каждом деплое и перезапуске. Добавить: small volume add"))
@@ -69,15 +84,16 @@ def cmd_volume_add(args):
         raise CliError(tr("--mount must be an absolute path such as /data, outside /app (the app's code lives there)",
                           "--mount — абсолютный путь вроде /data, вне /app (там лежит код приложения)"))
     api = Railway(require_token())
-    existing = api.service_volume(state["environmentId"], state["serviceId"])
+    service_id = target(args, state)
+    existing = api.service_volume(state["environmentId"], service_id)
     if existing is not None:
         say(tr("The app already has a volume at %s (Railway gives a service one volume).",
                "У приложения уже есть том в %s (Railway даёт сервису один том).") % existing["mountPath"])
         print(existing["mountPath"])
         return 0
-    api.create_volume(state["projectId"], state["environmentId"], state["serviceId"], mount)
+    api.create_volume(state["projectId"], state["environmentId"], service_id, mount)
     if not args.no_deploy:
-        api.redeploy(state["serviceId"], state["environmentId"])
+        api.redeploy(service_id, state["environmentId"])
     say(tr("Volume created at %s%s.", "Том создан в %s%s.") % (
         mount, tr(", Railway is restarting the app", ", Railway перезапускает приложение") if not args.no_deploy
         else tr("; it appears on the next deploy", "; он появится при следующем деплое")))

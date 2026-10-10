@@ -1,0 +1,41 @@
+# The small gateway, see gateway.py. Caddy serves the traffic; the sign-in server on 127.0.0.1:9000 decides who
+# gets in. Directives inside route run in the order written.
+{
+	admin off
+	auto_https off
+	persist_config off
+	servers {
+		# Railway's edge: it overwrites whatever X-Forwarded-For the visitor sent, so its value can be trusted
+		trusted_proxies static 100.64.0.0/10
+	}
+}
+
+:{$PORT:8080} {
+	route {
+		# A request this gateway has already sent on: the app's address points back at the gateway
+		@loop header X-Small-Gateway *
+		respond @loop "small gateway: the app's address points back at the gateway" 508
+
+		# Only the gateway says who is signed in
+		request_header -X-Small-User
+		request_header -X-Small-Method
+		request_header -X-Small-Auth
+
+		# Sign-in pages go to the sign-in server; its check endpoint is for Caddy only
+		respond /_access/check 404
+		reverse_proxy /_access/* 127.0.0.1:9000
+
+		# Everything else: ask the sign-in server first; 2xx lets it through with who it is, anything else
+		# (the sign-in page, a redirect that sets the cookie) goes back to the visitor as is
+		forward_auth 127.0.0.1:9000 {
+			uri /_access/check
+			copy_headers X-Small-User X-Small-Method X-Small-Auth
+		}
+		reverse_proxy {$UPSTREAM} {
+			header_up X-Small-Gateway 1
+			# a sleeping app takes a few seconds to wake up
+			lb_try_duration 30s
+			lb_try_interval 500ms
+		}
+	}
+}

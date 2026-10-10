@@ -222,6 +222,32 @@ are interchangeable with `MagicLink`/`MagicLinkASGI` that share the same `SESSIO
 returns to the page itself (`<app>/?code=…&state=…`), so register `https://<app>/` as the redirect URI; each tab gets
 its own state cookie.
 
+## Who is signed in
+
+A request that gets through tells the app who it is and how they signed in:
+
+| | Who | How (`email`, `google`, `microsoft`, `link`) |
+|---|---|---|
+| WSGI | `environ["magic_link.user"]` | `environ["magic_link.method"]` |
+| ASGI | `scope["magic_link.user"]` | `scope["magic_link.method"]` |
+| Node.js | `req.magicLinkUser` | `req.magicLinkMethod` |
+
+The user is an address, or the name of a personal invite link (`""` for the shared one). The `X-Small-*` headers a
+visitor might send never reach the app.
+
+## Behind the small gateway
+
+With `small gateway on` the gateway in front of the app does everything above; this file inside the app, if the app
+has it, only checks that a request came through the gateway. `SMALL_GATEWAY_KEY` set means: trust `X-Small-User`,
+`X-Small-Method` and `X-Small-Auth` when the signature is valid, and nothing else — no sign-in pages, no cookies, no
+`?token=`. A request that didn't come through the gateway gets a 403 page. `MagicLinkGate` has `behind_gateway` and
+`gateway_user(headers)` for the same check in Streamlit.
+
+An app in another language can check the signature itself: `X-Small-Auth` is `<unix time>.<signature>`, where the
+signature is HMAC-SHA256 with `SMALL_GATEWAY_KEY` over `small-gateway|<user>|<method>|<unix time>`, base64url without
+padding; accept it for 24 hours. `gateway_auth` / `gateway_identity` (Python) and `gatewayAuth` / `gatewayIdentity`
+(Node.js) implement it, and both test suites hold the same test vector.
+
 ## What this gate doesn't do
 
 - **No passwords or roles.** Email sign-in proves that the person owns the address; everyone who signs in has the
@@ -237,7 +263,7 @@ its own state cookie.
 - **Revocation takes effect after a restart:** the lists are read at startup. `small access revoke` restarts the app
   for you.
 - **Node.js websockets** (`server.on('upgrade')`) don't pass through the middleware: check the session there
-  yourself.
+  yourself, or put the app behind the small gateway, which checks websockets too.
 - Sensitive data calls for proper authorization with roles and an audit trail.
 
 ## Tests
@@ -245,8 +271,8 @@ its own state cookie.
 From the `magic-link` folder:
 
 ```bash
-python -m unittest test_magic_link     # 97: WSGI, ASGI, sign-on, email sign-in, SQLite, sign-outs, Telegram, mail
-node --test                            # 31
+python -m unittest test_magic_link     # 104: WSGI, ASGI, sign-on, email, SQLite, sign-outs, the gateway, mail
+node --test                            # 33
 ```
 
 What's covered:
@@ -268,4 +294,6 @@ What's covered:
 - SQLite state: a spent link after a "restart" and across concurrent workers, shared rate limits, signing out on all
   devices, a broken path falling back to memory; `SESSIONS_REVOKED` for an address, a domain and everyone, and
   sessions from before 0.8;
-- the sign-in page headers: no framing, a strict Content-Security-Policy, no scripts.
+- the sign-in page headers: no framing, a strict Content-Security-Policy, no scripts;
+- who is signed in for the app, and that a visitor's `X-Small-*` headers never reach it; behind the gateway: valid,
+  forged, expired and mismatched signatures, websockets, sign-in pages and invite links switched off.

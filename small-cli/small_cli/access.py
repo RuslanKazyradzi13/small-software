@@ -9,6 +9,7 @@ import re
 import secrets
 from urllib.parse import quote
 
+from . import gateway
 from .config import CONFIG_FILE, load_config
 from .i18n import tr
 from .railway import Railway, RailwayError, token_from_env
@@ -60,13 +61,19 @@ def parse_emails(value):
 
 
 def app_env(root, state, warn=None):
-    """(app variables, where each one comes from): Railway, overlaid with non-empty values from small.json."""
+    """(app variables, where each one comes from): Railway, overlaid with non-empty values from small.json. Behind the
+    gateway, the sign-in variables come from the gateway's service."""
     env, sources = {}, {}
     linked = all(state.get(k) for k in ("projectId", "environmentId", "serviceId"))
     if linked and token_from_env():
         try:
-            env = dict(Railway(token_from_env()).service_variables(
-                state["projectId"], state["environmentId"], state["serviceId"]))
+            api = Railway(token_from_env())
+            env = dict(api.service_variables(state["projectId"], state["environmentId"], state["serviceId"]))
+            if gateway.is_on(state):
+                for name in gateway.GATEWAY_ONLY:
+                    env.pop(name, None)
+                ours = api.service_variables(state["projectId"], state["environmentId"], state["gateway"]["serviceId"])
+                env.update({k: v for k, v in ours.items() if k in gateway.GATEWAY_ONLY + gateway.SHARED})
             sources = dict.fromkeys(env, "Railway")
         except RailwayError as e:
             if warn:
@@ -121,11 +128,11 @@ def app_url(root, state):
 
 def redirect_uri(root, state):
     """Where Google and Microsoft send people back after sign-in: /_access/sso/callback, or the page itself for
-    Streamlit (it can't serve other paths). None until the app has an address."""
+    Streamlit without the gateway (it can't serve other paths). None until the app has an address."""
     base = app_url(root, state)
     if base is None:
         return None
-    return base + "/" if is_streamlit(root) else base + SSO_CALLBACK
+    return base + "/" if is_streamlit(root) and not gateway.is_on(state) else base + SSO_CALLBACK
 
 
 def parse_revoked(value):
@@ -148,9 +155,11 @@ def add_revoked(value, who, now):
     return ", ".join("%s=%d" % pair for pair in keep)
 
 
-def feature_problem(root):
-    """None if the app's code knows sign-in with Google and Microsoft and signing out (small 0.8); otherwise what is
-    in the way and how to fix it."""
+def feature_problem(root, state=None):
+    """None if the app's code knows sign-in with Google and Microsoft and signing out (small 0.8), or the gateway
+    does it for the app; otherwise what is in the way and how to fix it."""
+    if gateway.is_on(state or {}):
+        return None
     streamlit = is_streamlit(root)
     if streamlit and "sso_finish" not in (root / "app.py").read_text(encoding="utf-8", errors="replace"):
         return (tr("app.py is from a streamlit template older than small 0.8, without sign-in with Google and "
@@ -170,11 +179,14 @@ def feature_problem(root):
     return None  # no magic_link next to the code: the app may keep it elsewhere, as for email sign-in
 
 
-def email_login_problem(root):
+def email_login_problem(root, state=None):
     """None if the app code supports sign-in by email; otherwise, what is in the way and how to fix it.
 
     Streamlit cannot be wrapped in middleware: there sign-in by email is done by require_access() in app.py via
-    MagicLinkGate from magic_link.py, so new versions of both files are needed."""
+    MagicLinkGate from magic_link.py, so new versions of both files are needed. Behind the gateway the app's code
+    doesn't matter: the gateway signs people in."""
+    if gateway.is_on(state or {}):
+        return None
     app = root / "app.py"
     source = app.read_text(encoding="utf-8", errors="replace") if app.is_file() else ""
     streamlit = "streamlit" in source
