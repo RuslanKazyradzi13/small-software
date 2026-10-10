@@ -14,7 +14,7 @@ dependencies = []
 small = "small_cli.cli:main"
 
 [tool.setuptools]
-packages = ["small_cli"]
+packages = ["small_cli", "small_cli.commands"]
 
 [tool.setuptools.package-data]
 small_cli = ["templates/*/*"]

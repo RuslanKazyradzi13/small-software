@@ -19,7 +19,6 @@ small destroy            # удалить из Railway
 |---|---|
 | [small-cli](small-cli/README.md) | утилита `small` (Python 3.8+, без зависимостей): `init` (шаблоны python-http, node-http, fastapi, streamlit), `deploy`, `link`/`open`, `access`, `env`, `logs`, `destroy`, `dashboard` |
 | [magic-link](magic-link/README.md) | доступ по ссылке-приглашению с личными токенами: middleware для Python (WSGI и ASGI) и Node.js; его же используют шаблоны `small init` |
-| [manual-test-app](manual-test-app) | приложение, созданное `small init`, — пример того, что получается из шаблона `python-http` |
 
 ## Установка
 

@@ -1,5 +1,0 @@
-# Не загружать в Railway (в дополнение к .gitignore)
-*.md
-tests/
-.vscode/
-.idea/

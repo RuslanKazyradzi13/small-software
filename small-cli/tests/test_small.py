@@ -25,7 +25,8 @@ from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 from small_cli.archive import IgnoreRules
-from small_cli.cli import load_config, main
+from small_cli.cli import main
+from small_cli.config import load_config
 from small_cli.dashboard import DashboardServer, add_live_status, scan_apps, start_server
 from small_cli.scaffold import TEMPLATES_DIR
 
@@ -1092,7 +1093,7 @@ class OpsCommandsTest(unittest.TestCase):
             else:
                 raise KeyboardInterrupt
 
-        with mock.patch("small_cli.cli.time.sleep", side_effect=fake_sleep):
+        with mock.patch("time.sleep", side_effect=fake_sleep):
             code, out, err = run(["logs", self.app, "--follow"],
                                  {"SMALL_API_URL": server.url, "RAILWAY_API_TOKEN": TOKEN})
         self.assertEqual(code, 0, err)

@@ -1,8 +1,0 @@
-# Не коммитить
-small.json
-.small.json
-.env
-__pycache__/
-*.pyc
-.venv/
-venv/
