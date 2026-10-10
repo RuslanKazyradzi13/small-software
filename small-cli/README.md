@@ -35,10 +35,16 @@ pip install ./small-cli
 Нужен **токен аккаунта** или **токен workspace** (Railway → Account Settings → Tokens). Токен проекта не подойдёт:
 он не умеет создавать проекты.
 
+Сохраните токен в переменную `RAILWAY_API_TOKEN`, заменив `ВАШ_ТОКЕН` целиком. Внутри кавычек должен остаться только
+токен вида `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`:
+
 ```powershell
-$env:RAILWAY_API_TOKEN = "<токен>"                                          # текущая сессия
-[Environment]::SetEnvironmentVariable("RAILWAY_API_TOKEN", "<токен>", "User")  # навсегда
+[Environment]::SetEnvironmentVariable("RAILWAY_API_TOKEN", "ВАШ_ТОКЕН", "User")  # навсегда
+$env:RAILWAY_API_TOKEN = "ВАШ_ТОКЕН"                                          # только этот терминал
 ```
+
+Переменная, сохранённая «навсегда», видна новым окнам терминала. Уже открытые окна и приложения её не видят, их
+нужно перезапустить. Пробелы, кавычки и угловые скобки по краям токена `small` отбрасывает сам.
 
 Резервное имя переменной: `RAILWAY_TOKEN`.
 

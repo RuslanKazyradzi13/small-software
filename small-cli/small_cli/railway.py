@@ -17,7 +17,10 @@ class RailwayError(Exception):
 
 
 def token_from_env():
-    return next((os.environ[v] for v in TOKEN_ENV_VARS if os.environ.get(v)), None)
+    """Токен Railway из окружения. Пробелы, кавычки и угловые скобки по краям отбрасываются: в токене их не бывает,
+    а из заготовки вида "<токен>" их легко скопировать вместе со значением."""
+    raw = next((os.environ[v] for v in TOKEN_ENV_VARS if os.environ.get(v)), "")
+    return raw.strip().strip("\"'<>").strip() or None
 
 
 class Railway:

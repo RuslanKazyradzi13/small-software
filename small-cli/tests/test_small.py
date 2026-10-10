@@ -275,6 +275,19 @@ class DeployTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("RAILWAY_API_TOKEN", err)
 
+    def test_token_copied_with_brackets_quotes_or_spaces(self):
+        from small_cli.railway import token_from_env
+        for raw in ("<%s>" % TOKEN, ' "%s" ' % TOKEN, "'%s'\n" % TOKEN):
+            with mock.patch.dict(os.environ, {"RAILWAY_API_TOKEN": raw}):
+                self.assertEqual(token_from_env(), TOKEN, raw)
+        with mock.patch.dict(os.environ, {"RAILWAY_API_TOKEN": " <> "}):
+            self.assertIsNone(token_from_env())
+        server = MockRailway()
+        self.addCleanup(server.close)
+        code, _, err = run(["deploy", self.app, "--interval", "0"],
+                           {"RAILWAY_API_TOKEN": "<%s>" % TOKEN, "SMALL_API_URL": server.url})
+        self.assertEqual(code, 0, err)  # мок пускает только «Bearer test-token» — значит, скобки отброшены
+
     def test_bad_token(self):
         server = MockRailway()
         self.addCleanup(server.close)
