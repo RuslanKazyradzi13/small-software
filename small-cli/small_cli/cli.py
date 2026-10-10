@@ -12,6 +12,7 @@ import sys
 from . import __version__, commands
 from .common import CliError
 from .config import ConfigError
+from .i18n import tr
 from .railway import RailwayError
 
 
@@ -21,10 +22,11 @@ def main(argv=None):
     try:
         return args.func(args)
     except (CliError, ConfigError, RailwayError) as e:
-        print("Ошибка: %s" % e, file=sys.stderr)
+        print(tr("Error: %s", "Ошибка: %s") % e, file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("\nПрервано. Уже запущенная сборка продолжится в Railway.", file=sys.stderr)
+        print(tr("\nInterrupted. A build that has already started will keep running in Railway.",
+                 "\nПрервано. Уже запущенная сборка продолжится в Railway."), file=sys.stderr)
         return 130
 
 
@@ -64,9 +66,10 @@ def _console_codepage():
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="small", description="Микро-приложения на Railway одной командой.")
+    parser = argparse.ArgumentParser(prog="small", description=tr("Micro-apps on Railway with one command.",
+                                                                  "Микро-приложения на Railway одной командой."))
     parser.add_argument("--version", action="version", version="small " + __version__)
-    sub = parser.add_subparsers(dest="command", metavar="<команда>")
+    sub = parser.add_subparsers(dest="command", metavar=tr("<command>", "<команда>"))
     sub.required = True
     for module in commands.ALL:
         module.register(sub)

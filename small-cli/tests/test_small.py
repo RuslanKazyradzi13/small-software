@@ -3,6 +3,8 @@
 Запуск: python -m unittest discover -s tests
 """
 
+import argparse
+import ast
 import contextlib
 import http.client
 import importlib.util
@@ -26,7 +28,7 @@ from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 from small_cli.archive import IgnoreRules
-from small_cli import cli
+from small_cli import cli, dashboard, i18n
 from small_cli.cli import main
 from small_cli.config import load_config
 from small_cli.dashboard import DashboardServer, add_live_status, add_usage, scan_apps, start_server
@@ -403,7 +405,7 @@ class ConfigFileTest(unittest.TestCase):
         self.assertEqual(server.variables["serviceCreate"]["input"]["name"], "my-custom-app-name")
         self.assertEqual(server.variables["variableCollectionUpsert"]["input"], {
             "projectId": "proj-1", "environmentId": "env-1", "serviceId": "svc-1",
-            "variables": {"OPENAI_API_KEY": "sk-test-123", "DEBUG": "true", "WORKERS": "2"},
+            "variables": {"OPENAI_API_KEY": "sk-test-123", "DEBUG": "true", "WORKERS": "2", "OWNER_LANG": "ru"},
             "replace": False, "skipDeploys": True,
         })
         self.assertLess(server.calls.index("variableCollectionUpsert"), server.calls.index("UPLOAD"))
@@ -423,7 +425,8 @@ class ConfigFileTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertNotIn("projects", server.calls)
         self.assertNotIn("projectCreate", server.calls)
-        self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"], {"DEBUG": "false"})
+        self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"],
+                         {"DEBUG": "false", "OWNER_LANG": "ru"})  # OWNER_LANG — язык small: лог и Telegram владельцу
         self.assertLess(server.calls.index("variableCollectionUpsert"), server.calls.index("UPLOAD"))
 
     def test_email_login_gets_public_url_of_the_final_domain(self):
@@ -650,7 +653,8 @@ class InitTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(out.strip(), "https://%s.up.railway.app" % config["name"])
         self.assertEqual(server.variables["projectCreate"]["input"]["name"], config["name"])
-        self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"], config["env"])
+        self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"],
+                         dict(config["env"], OWNER_LANG="ru"))
         self.assertEqual(server.uploads, [["./.gitignore", "./.railwayignore", "./app.py", "./magic_link.py"]])
 
     def check_running_app(self, command, token):
@@ -674,7 +678,7 @@ class InitTest(unittest.TestCase):
         self.assertEqual((status, res.getheader("Location")), (302, "/"))
         status, _, body = http_get(port, "/", cookie=res.getheader("Set-Cookie").split(";")[0])
         self.assertEqual(status, 200)
-        self.assertIn("Работает!", body)
+        self.assertIn("It works!", body)
 
     def test_python_template_runs(self):
         self.assertEqual(self.init()[0], 0)
@@ -970,7 +974,8 @@ class StreamlitTemplateTest(unittest.TestCase):
                            {"RAILWAY_API_TOKEN": TOKEN, "SMALL_API_URL": server.url})
         self.assertEqual(code, 0, err)
         self.assertEqual(server.uploads, [["./.gitignore", "./.railwayignore", "./app.py", "./requirements.txt"]])
-        self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"], {"ACCESS_TOKEN": self.token})
+        self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"],
+                         {"ACCESS_TOKEN": self.token, "OWNER_LANG": "ru"})
 
     def test_help_lists_all_templates(self):
         out = io.StringIO()
@@ -1010,7 +1015,7 @@ class StreamlitTemplateTest(unittest.TestCase):
         at = self.app_test(token=self.token)
         self.assertFalse(at.exception)
         self.assertEqual(at.title[0].value, "🚀 small + Streamlit")
-        self.assertEqual([m.label for m in at.metric], ["Альфа", "Бета", "Гамма"])
+        self.assertEqual([m.label for m in at.metric], ["Alpha", "Beta", "Gamma"])
         at.sidebar.slider[0].set_value(300).run()  # интерактивность: перерисовка с другими параметрами
         self.assertFalse(at.exception)
 
@@ -1020,7 +1025,7 @@ class StreamlitTemplateTest(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             at = self.app_test(token=self.token, env={"ACCESS_TOKEN": "owner-tok,bob:" + self.token})
         self.assertEqual(at.title[0].value, "🚀 small + Streamlit")
-        self.assertIn("вход по ссылке (bob)", out.getvalue())
+        self.assertIn("signed in by link (bob)", out.getvalue())
         revoked = self.app_test(token=self.token, env={"ACCESS_TOKEN": "owner-tok"})  # bob отозван
         self.assertIn("Ссылка недействительна", revoked.markdown[0].value)
 
@@ -1639,9 +1644,9 @@ class FastAPITemplateTest(unittest.TestCase):
             page = client.get("/")  # кука уже у клиента
             self.assertEqual(page.status_code, 200)
             self.assertIn("small + FastAPI", page.text)
-            self.assertEqual(client.get("/api/hello", params={"name": "bob"}).json()["message"], "Привет, bob!")
+            self.assertEqual(client.get("/api/hello", params={"name": "bob"}).json()["message"], "Hello, bob!")
             self.assertEqual(client.get("/docs").status_code, 200)
-        self.assertIn("вход по ссылке (bob)", log.getvalue())
+        self.assertIn("signed in by link (bob)", log.getvalue())
 
     @unittest.skipUnless(HAS_FASTAPI, "fastapi/uvicorn/httpx не установлены")
     def test_uvicorn_like_railway_and_token_hidden_in_access_log(self):
@@ -1971,7 +1976,7 @@ class PipeEncodingTest(unittest.TestCase):
         launcher = str(Path(__file__).resolve().parents[1] / "small.cmd")
         for encoding in ("utf-8", "cp866"):
             proc = subprocess.run(["cmd", "/c", launcher, "--help"], capture_output=True,
-                                  env=dict(os.environ, PYTHONIOENCODING=encoding))
+                                  env=dict(os.environ, PYTHONIOENCODING=encoding, SMALL_LANG="ru"))
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertIn("Микро-приложения на Railway", proc.stdout.decode(encoding))
 
@@ -1993,6 +1998,136 @@ class IgnoreRulesTest(unittest.TestCase):
         self.assertFalse(self.check(["*.log", "!keep.log"], "keep.log"))
         self.assertTrue(self.check(["# comment", "", ".env"], ".env"))
         self.assertTrue(self.check(["file[0-9].txt"], "file7.txt"))
+
+
+CYRILLIC = re.compile("[Ѐ-ӿ]")
+
+
+class LanguageTest(unittest.TestCase):
+    """small говорит по-английски и по-русски: язык — по системе, SMALL_LANG сильнее."""
+
+    def test_detect(self):
+        cases = [
+            ({"SMALL_LANG": "en", "LANG": "ru_RU.UTF-8"}, "linux", "en"),
+            ({"SMALL_LANG": "RU"}, "linux", "ru"),
+            ({"SMALL_LANG": "de", "LANG": "ru_RU.UTF-8"}, "linux", "ru"),  # неизвестный SMALL_LANG не мешает локали
+            ({"LANG": "ru_RU.UTF-8"}, "darwin", "ru"),
+            ({"LANG": "en_US.UTF-8"}, "linux", "en"),
+            ({"LC_ALL": "en_GB.UTF-8", "LANG": "ru_RU.UTF-8"}, "linux", "en"),
+            ({"LANG": "C.UTF-8"}, "linux", "en"),
+            ({"LANGUAGE": "ru:en"}, "linux", "ru"),
+            ({}, "linux", "en"),
+        ]
+        for environ, platform, expected in cases:
+            self.assertEqual(i18n.detect(environ, platform), expected, environ)
+
+    def test_windows_display_language(self):
+        for ui_language, expected in ((0x419, "ru"), (0x409, "en"), (0x422, "en"), (0, "en")):
+            with mock.patch.object(i18n, "_windows_ui_language", lambda: ui_language):
+                self.assertEqual(i18n.detect({}, "win32"), expected, hex(ui_language))
+            with mock.patch.object(i18n, "_windows_ui_language", lambda: ui_language):
+                self.assertEqual(i18n.detect({"SMALL_LANG": "en"}, "win32"), "en")
+
+    def test_every_russian_string_has_an_english_twin(self):
+        """Кириллица в коде CLI — только вторым аргументом tr(en, ru), в комментариях и docstring'ах."""
+        allowed = {"д", "да"}  # ответы, которые принимает confirm()
+        package = Path(__file__).resolve().parents[1] / "small_cli"
+        problems = []
+        for path in sorted(package.rglob("*.py")):
+            if "templates" in path.parts:
+                continue  # приложения: язык посетителя и OWNER_LANG, проверяются своими тестами
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            russian, docstrings = set(), set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Tuple) and len(node.elts) == 2 and all(
+                        isinstance(n, ast.Constant) and isinstance(n.value, str) for n in node.elts)                         and not CYRILLIC.search(node.elts[0].value):
+                    russian.add(id(node.elts[1]))  # пара ("English", "Русский") для tr(*pair)
+                if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "tr"                         and not any(isinstance(a, ast.Starred) for a in node.args):
+                    self.assertEqual(len(node.args), 2, "%s:%d" % (path.name, node.lineno))
+                    english = [n.value for n in ast.walk(node.args[0])
+                               if isinstance(n, ast.Constant) and isinstance(n.value, str) and CYRILLIC.search(n.value)]
+                    self.assertEqual(english, [], "%s:%d: кириллица в английском тексте" % (path.name, node.lineno))
+                    russian.update(id(n) for n in ast.walk(node.args[1]))
+                body = getattr(node, "body", None)
+                if isinstance(body, list) and body and isinstance(body[0], ast.Expr) \
+                        and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+                    docstrings.add(id(body[0].value))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str) and CYRILLIC.search(node.value) \
+                        and id(node) not in russian and id(node) not in docstrings and node.value not in allowed:
+                    problems.append("%s:%d %r" % (path.relative_to(package), node.lineno, node.value[:60]))
+        self.assertEqual(problems, [], "русский текст без английского варианта")
+
+
+class EnglishOutputTest(unittest.TestCase):
+    """По-английски small не выдаёт ни слова по-русски."""
+
+    def setUp(self):
+        i18n.use("en")
+        self.addCleanup(i18n.use, "ru")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def assertEnglish(self, text):
+        self.assertIsNone(CYRILLIC.search(text), text)
+
+    def test_help_of_every_command(self):
+        def walk(parser):
+            yield parser
+            for action in parser._actions:
+                if isinstance(action, argparse._SubParsersAction):
+                    for sub in action.choices.values():
+                        yield from walk(sub)
+
+        parsers = list(walk(cli.build_parser()))
+        self.assertGreater(len(parsers), 20)
+        for parser in parsers:
+            self.assertEnglish(parser.format_help())
+
+    def test_init_deploy_access_env(self):
+        app = os.path.join(self.tmp.name, "team-budget")
+        code, out, err = run(["init", app], {})
+        self.assertEqual(code, 0, err)
+        self.assertEnglish(out + err)
+        self.assertIn("small deploy", err + out)
+        server = MockRailway()
+        self.addCleanup(server.close)
+        env = {"RAILWAY_API_TOKEN": TOKEN, "SMALL_API_URL": server.url}
+        for argv in (["deploy", app, "--interval", "0"],
+                     ["access", "-C", app, "add", "ivan@company.com"],
+                     ["access", "-C", app, "add", "bob"],
+                     ["access", "-C", app, "list"],
+                     ["env", "-C", app, "set", "DEBUG=1"],
+                     ["env", "-C", app],
+                     ["mail", "-C", app, "log"],
+                     ["mail", "-C", app]):
+            code, out, err = run(argv, env)
+            self.assertEqual(code, 0, (argv, err))
+            self.assertEnglish(out + err)
+        self.assertEqual(server.service_vars.get("OWNER_LANG"), "en")  # лог и Telegram владельцу — по-английски
+
+    def test_errors(self):
+        for argv, env in ((["deploy", self.tmp.name], {}),  # нет токена
+                          (["deploy", os.path.join(self.tmp.name, "missing")], {"RAILWAY_API_TOKEN": TOKEN}),
+                          (["logs", self.tmp.name], {"RAILWAY_API_TOKEN": TOKEN})):
+            code, out, err = run(argv, env)
+            self.assertEqual(code, 1, argv)
+            self.assertTrue(err.startswith("Error: "), err)
+            self.assertEnglish(out + err)
+
+    def test_dashboard_page(self):
+        page = dashboard.render_page()
+        self.assertIn('<html lang="en">', page)
+        self.assertEnglish(page)
+
+
+def setUpModule():
+    # Проверки выше читают русский текст; английский — в EnglishOutputTest. Язык машины и CI не важен.
+    i18n.use("ru")
+
+
+def tearDownModule():
+    i18n.use(None)
 
 
 if __name__ == "__main__":

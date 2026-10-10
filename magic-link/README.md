@@ -85,6 +85,7 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 | `LOGIN_LINKS_TO_LOG` | `1` — ссылка для входа в лог вместо письма (проверка) |
 | `PUBLIC_URL` | адрес приложения для ссылок в письмах, например свой домен; по умолчанию `https://$RAILWAY_PUBLIC_DOMAIN`. После переименования домена Railway оставляет там прежний адрес, поэтому `small deploy` и `small access add` задают `PUBLIC_URL` сами |
 | `ACCESS_LANG` | язык страниц и писем: `ru`, `en` или `auto` (по умолчанию — по языку браузера: русским по-русски, остальным по-английски) |
+| `OWNER_LANG` | язык сообщений для владельца — строк лога и уведомлений в Telegram: `en` (по умолчанию) или `ru`. `small deploy` задаёт его по языку small |
 | `ACCESS_TOKEN` | токены ссылок-приглашений через запятую; можно с именами: `alice:токен1,bob:токен2` |
 | `ACCESS_REQUEST_URL` | куда ведёт кнопка «Запросить доступ», если нет входа по почте |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | запросы доступа приходят владельцу в Telegram (`small notify telegram`) |

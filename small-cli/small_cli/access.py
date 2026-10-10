@@ -9,6 +9,7 @@ import secrets
 from urllib.parse import quote
 
 from .config import CONFIG_FILE, load_config
+from .i18n import tr
 from .railway import Railway, RailwayError, token_from_env
 from .scaffold import TEMPLATES_DIR
 
@@ -62,7 +63,8 @@ def app_env(root, state, warn=None):
             sources = dict.fromkeys(env, "Railway")
         except RailwayError as e:
             if warn:
-                warn("Не удалось прочитать переменные сервиса в Railway: %s" % e)
+                warn(tr("Could not read the service variables from Railway: %s",
+                        "Не удалось прочитать переменные сервиса в Railway: %s") % e)
     for name, value in load_config(root / CONFIG_FILE)["env"].items():
         if value:
             env[name], sources[name] = value, CONFIG_FILE
@@ -99,9 +101,14 @@ def email_login_problem(root):
         if path.is_file():
             if "ACCESS_EMAILS" in path.read_text(encoding="utf-8", errors="replace"):
                 return None
-            return ("%s в приложении старой версии и не знает входа по почте. Замените его новым: %s"
+            return (tr("%s in the app is an old version and does not support sign-in by email. "
+                       "Replace it with the new one: %s",
+                       "%s в приложении старой версии и не знает входа по почте. Замените его новым: %s")
                     % (name, TEMPLATES_DIR / template / name))
     app = root / "app.py"
     if app.is_file() and "streamlit" in app.read_text(encoding="utf-8", errors="replace"):
-        return "в шаблоне streamlit вход по почте пока не поддерживается — выдайте личную ссылку: small access add ИМЯ"
+        return tr("the streamlit template does not support sign-in by email yet — "
+                  "grant a personal link instead: small access add NAME",
+                  "в шаблоне streamlit вход по почте пока не поддерживается — "
+                  "выдайте личную ссылку: small access add ИМЯ")
     return None

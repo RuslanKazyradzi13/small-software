@@ -6,35 +6,44 @@ import json
 
 from ..common import CliError, app_dir, is_linked, require_token, say
 from ..config import CONFIG_FILE, ENV_NAME_RE, STATE_FILE, load_config, load_state
+from ..i18n import tr
 from ..railway import Railway, token_from_env
 
 
 def register(sub):
-    e = sub.add_parser("env", help="переменные приложения: список, задать, удалить",
-                       description="Переменные приложения. set/unset меняют их сразу и в Railway, и в %s "
-                                   "(иначе следующий small deploy вернул бы старые значения), затем Railway "
-                                   "перезапускает приложение. Без подкоманды — список." % CONFIG_FILE)
-    e.add_argument("-C", "--path", default=".", help="папка приложения (по умолчанию текущая)")
+    e = sub.add_parser("env", help=tr("app environment variables: list, set, unset",
+                                      "переменные приложения: список, задать, удалить"),
+                       description=tr("App environment variables. set/unset change them in both Railway and %s "
+                                      "at once (otherwise the next small deploy would bring back the old values), "
+                                      "then Railway restarts the app. With no subcommand, lists them.",
+                                      "Переменные приложения. set/unset меняют их сразу и в Railway, и в %s "
+                                      "(иначе следующий small deploy вернул бы старые значения), затем Railway "
+                                      "перезапускает приложение. Без подкоманды — список.") % CONFIG_FILE)
+    e.add_argument("-C", "--path", default=".", help=tr("app folder (default: current folder)",
+                                                        "папка приложения (по умолчанию текущая)"))
     e.set_defaults(func=cmd_env_list, values=False)
     env_sub = e.add_subparsers(dest="env_command", metavar="<list|set|unset>")
-    el = env_sub.add_parser("list", help="показать переменные (значения скрыты)")
-    el.add_argument("--values", action="store_true", help="показать значения")
+    el = env_sub.add_parser("list", help=tr("list variables (values hidden)", "показать переменные (значения скрыты)"))
+    el.add_argument("--values", action="store_true", help=tr("show values", "показать значения"))
     el.set_defaults(func=cmd_env_list)
-    es = env_sub.add_parser("set", help="задать переменные: small env set KEY=VALUE ...")
+    es = env_sub.add_parser("set", help=tr("set variables: small env set KEY=VALUE ...",
+                                           "задать переменные: small env set KEY=VALUE ..."))
     es.add_argument("pairs", nargs="+", metavar="KEY=VALUE")
     es.set_defaults(func=cmd_env_set)
-    eu = env_sub.add_parser("unset", help="удалить переменные: small env unset KEY ...")
+    eu = env_sub.add_parser("unset", help=tr("remove variables: small env unset KEY ...",
+                                             "удалить переменные: small env unset KEY ..."))
     eu.add_argument("names", nargs="+", metavar="KEY")
     eu.set_defaults(func=cmd_env_unset)
     for parser in (el, es, eu):
-        parser.add_argument("-C", "--path", default=argparse.SUPPRESS, help="папка приложения")
+        parser.add_argument("-C", "--path", default=argparse.SUPPRESS, help=tr("app folder", "папка приложения"))
     for parser in (es, eu):
         add_no_deploy(parser)
 
 
 def add_no_deploy(parser):
     parser.add_argument("--no-deploy", action="store_true",
-                        help="не перезапускать приложение (изменения вступят в силу при следующем деплое)")
+                        help=tr("don't restart the app (changes take effect on the next deploy)",
+                                "не перезапускать приложение (изменения вступят в силу при следующем деплое)"))
 
 
 def change_env(root, set_vars=None, unset=(), deploy=True, railway_only=None):
@@ -71,13 +80,16 @@ def change_env(root, set_vars=None, unset=(), deploy=True, railway_only=None):
 
 def report_env_change(linked, deploy, what):
     if not linked:
-        say("%s. Записано в %s; приложение ещё не задеплоено — в Railway попадёт при small deploy."
+        say(tr("%s. Saved to %s; the app is not deployed yet, Railway gets it on small deploy.",
+               "%s. Записано в %s; приложение ещё не задеплоено — в Railway попадёт при small deploy.")
             % (what, CONFIG_FILE))
     elif deploy:
-        say("%s. Обновлено в Railway и %s, Railway перезапускает приложение (small logs -f — следить)."
+        say(tr("%s. Updated in Railway and %s; Railway is restarting the app (follow with small logs -f).",
+               "%s. Обновлено в Railway и %s, Railway перезапускает приложение (small logs -f — следить).")
             % (what, CONFIG_FILE))
     else:
-        say("%s. Обновлено в Railway и %s, вступит в силу при следующем деплое." % (what, CONFIG_FILE))
+        say(tr("%s. Updated in Railway and %s; takes effect on the next deploy.",
+               "%s. Обновлено в Railway и %s, вступит в силу при следующем деплое.") % (what, CONFIG_FILE))
 
 
 def cmd_env_list(args):
@@ -93,10 +105,11 @@ def cmd_env_list(args):
                 state["projectId"], state["environmentId"], state["serviceId"], unrendered=True).items()
                 if not k.startswith("RAILWAY_")}
         else:
-            say("Нет RAILWAY_API_TOKEN — показываю только %s" % CONFIG_FILE)
+            say(tr("No RAILWAY_API_TOKEN, showing %s only", "Нет RAILWAY_API_TOKEN — показываю только %s")
+                % CONFIG_FILE)
     names = sorted(set(config_env) | set(railway_env or {}))
     if not names:
-        say("Переменных нет. Задать: small env set KEY=VALUE")
+        say(tr("No variables. Set one: small env set KEY=VALUE", "Переменных нет. Задать: small env set KEY=VALUE"))
         return 0
     width = max(len(n) for n in names) + 2
     for name in names:
@@ -105,13 +118,14 @@ def cmd_env_list(args):
         if in_config and in_railway:
             where = CONFIG_FILE + " + Railway" if config_env[name] == railway_env[name] else "Railway ≠ " + CONFIG_FILE
         elif in_railway:
-            where = "только Railway"
+            where = tr("Railway only", "только Railway")
         else:
-            where = CONFIG_FILE + (" (в Railway — после small deploy)" if railway_env is not None else "")
+            where = CONFIG_FILE + (tr(" (in Railway after small deploy)", " (в Railway — после small deploy)")
+                                   if railway_env is not None else "")
         shown = value if getattr(args, "values", False) else "•" * min(len(value), 8) + " (%d)" % len(value)
         print("%-*s%-24s %s" % (width, name, shown, where))
     if not getattr(args, "values", False):
-        say("Значения скрыты: small env list --values")
+        say(tr("Values hidden: small env list --values", "Значения скрыты: small env list --values"))
     return 0
 
 
@@ -121,15 +135,17 @@ def cmd_env_set(args):
     for pair in args.pairs:
         name, sep, value = pair.partition("=")
         if not sep or not ENV_NAME_RE.match(name):
-            raise CliError("ожидается KEY=VALUE (KEY — латиница, цифры, _; не с цифры), получено: %s" % pair)
+            raise CliError(tr("expected KEY=VALUE (KEY: Latin letters, digits, _; must not start with a digit), "
+                              "got: %s",
+                              "ожидается KEY=VALUE (KEY — латиница, цифры, _; не с цифры), получено: %s") % pair)
         pairs[name] = value
     linked = change_env(root, set_vars=pairs, deploy=not args.no_deploy)
-    report_env_change(linked, not args.no_deploy, "Заданы: " + ", ".join(sorted(pairs)))
+    report_env_change(linked, not args.no_deploy, tr("Set: ", "Заданы: ") + ", ".join(sorted(pairs)))
     return 0
 
 
 def cmd_env_unset(args):
     root = app_dir(args.path)
     linked = change_env(root, unset=args.names, deploy=not args.no_deploy)
-    report_env_change(linked, not args.no_deploy, "Удалены: " + ", ".join(args.names))
+    report_env_change(linked, not args.no_deploy, tr("Removed: ", "Удалены: ") + ", ".join(args.names))
     return 0

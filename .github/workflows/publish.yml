@@ -1,0 +1,56 @@
+name: publish
+
+# Публикация small-cli на PyPI при выпуске релиза на GitHub. Без токенов: PyPI доверяет этому workflow
+# (Trusted Publishing, https://docs.pypi.org/trusted-publishers/). Запуск вручную только собирает пакет.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Сборка пакета
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Версия в pyproject.toml совпадает с тегом релиза
+        if: github.event_name == 'release'
+        working-directory: small-cli
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          test "v$version" = "$TAG" || { echo "pyproject.toml: $version, тег: $TAG"; exit 1; }
+      - name: sdist и wheel
+        working-directory: small-cli
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check --strict dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: small-cli/dist/
+
+  pypi:
+    name: Публикация на PyPI
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/small-cli
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

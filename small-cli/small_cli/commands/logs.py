@@ -4,16 +4,22 @@ import argparse
 import time
 
 from ..common import CliError, app_dir, linked_state, log_time, require_token, say
+from ..i18n import tr
 from ..railway import Railway, RailwayError
 
 
 def register(sub):
-    g = sub.add_parser("logs", help="логи приложения из Railway",
-                       description="Показать лог последнего деплоя: приложения (по умолчанию) или сборки.")
-    g.add_argument("path", nargs="?", default=".", help="папка приложения (по умолчанию текущая)")
-    g.add_argument("--build", action="store_true", help="лог сборки вместо лога приложения")
-    g.add_argument("-n", "--lines", type=int, default=100, help="сколько строк (по умолчанию 100)")
-    g.add_argument("-f", "--follow", action="store_true", help="следить за новыми строками (Ctrl+C — выход)")
+    g = sub.add_parser("logs", help=tr("app logs from Railway", "логи приложения из Railway"),
+                       description=tr("Show the log of the latest deploy: the app log (default) or the build log.",
+                                      "Показать лог последнего деплоя: приложения (по умолчанию) или сборки."))
+    g.add_argument("path", nargs="?", default=".", help=tr("app folder (default: current folder)",
+                                                           "папка приложения (по умолчанию текущая)"))
+    g.add_argument("--build", action="store_true", help=tr("build log instead of the app log",
+                                                           "лог сборки вместо лога приложения"))
+    g.add_argument("-n", "--lines", type=int, default=100, help=tr("number of lines (default 100)",
+                                                                   "сколько строк (по умолчанию 100)"))
+    g.add_argument("-f", "--follow", action="store_true", help=tr("follow new lines (Ctrl+C to exit)",
+                                                                  "следить за новыми строками (Ctrl+C — выход)"))
     g.add_argument("--interval", type=float, default=2.0, help=argparse.SUPPRESS)
     g.set_defaults(func=cmd_logs)
 
@@ -24,8 +30,9 @@ def cmd_logs(args):
     api = Railway(require_token())
     deployment = api.latest_deployment(state["serviceId"], state["environmentId"])
     if not deployment:
-        raise CliError("у сервиса %s ещё нет деплоев" % state.get("name", ""))
-    say("Лог %s · деплой %s · %s" % ("сборки" if args.build else "приложения", deployment["id"], deployment["status"]))
+        raise CliError(tr("service %s has no deploys yet", "у сервиса %s ещё нет деплоев") % state.get("name", ""))
+    say(tr("%s log · deploy %s · %s", "Лог %s · деплой %s · %s")
+        % (tr("Build", "сборки") if args.build else tr("App", "приложения"), deployment["id"], deployment["status"]))
 
     seen, last = set(), {"ts": None}
 
@@ -40,13 +47,13 @@ def cmd_logs(args):
     show(api.log_entries(deployment["id"], build=args.build, limit=args.lines))
     if not args.follow:
         return 0
-    say("Слежу за новыми строками, Ctrl+C — выход")
+    say(tr("Following new lines, Ctrl+C to exit", "Слежу за новыми строками, Ctrl+C — выход"))
     try:
         while True:
             time.sleep(args.interval)
             try:
                 show(api.log_entries(deployment["id"], build=args.build, limit=args.lines, start_date=last["ts"]))
             except RailwayError as e:
-                say("  повторяю запрос: %s" % e)
+                say(tr("  retrying: %s", "  повторяю запрос: %s") % e)
     except KeyboardInterrupt:
         return 0

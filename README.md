@@ -4,7 +4,8 @@
 
 <p align="center">
   <a href="https://github.com/RuslanKazyradzi13/small-software/actions/workflows/tests.yml"><img src="https://github.com/RuslanKazyradzi13/small-software/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
-  <img src="https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white" alt="Python 3.8+">
+  <a href="https://pypi.org/project/small-cli/"><img src="https://img.shields.io/pypi/v/small-cli?color=3DDC84&label=PyPI" alt="PyPI"></a>
+  <img src="https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/node-18%2B-339933?logo=nodedotjs&logoColor=white" alt="Node.js 18+">
   <img src="https://img.shields.io/badge/dependencies-0-3DDC84" alt="Zero dependencies">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-FFB020" alt="MIT license"></a>
@@ -39,13 +40,12 @@ of users, not for an app that five colleagues open twice a week.
 > [!NOTE]
 > **Beta.** small works end to end and is tested on Windows, macOS and Linux, but it is young: expect rough edges
 > and please [open an issue](https://github.com/RuslanKazyradzi13/small-software/issues) when something breaks.
-> Sign-in pages and emails speak English and Russian; **CLI messages are in Russian for now** — English is next.
+> The CLI, sign-in pages and emails speak English and Russian.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/RuslanKazyradzi13/small-software && cd small-software
-pip install ./small-cli                    # Windows: add small-cli/ to PATH instead (see below)
+pip install small-cli                      # or: pipx install small-cli
 export RAILWAY_API_TOKEN=...               # Railway → Account Settings → Tokens
 
 small init team-budget                     # a ready app with invite-only login
@@ -138,20 +138,20 @@ small destroy                                    # remove the app and its databa
 
 ## Install
 
-- **macOS / Linux:** `pip install ./small-cli`
-- **Windows:** `pip install` creates `small.exe`, which Smart App Control may block. Add the `small-cli` folder to
-  `PATH` instead — the `small` command is then served by `small.cmd`.
+- **Everywhere:** `pip install small-cli` (or `pipx install small-cli`). Python 3.9+, no dependencies.
+- **Windows:** if Smart App Control blocks the unsigned `small.exe` that pip creates, run `python -m small_cli`
+  instead, or clone the repo and add its `small-cli` folder to `PATH` — `small.cmd` then serves the command.
+- **Language:** English or Russian, picked from your system language. Force one with `SMALL_LANG=en` or `SMALL_LANG=ru`.
 - A Railway **account or workspace token** goes to `RAILWAY_API_TOKEN` (a project token cannot create projects).
 
-Full CLI reference (in Russian): [small-cli/README.md](small-cli/README.md).
+Full CLI reference: [small-cli/README.md](small-cli/README.md) · [по-русски](small-cli/README.ru.md).
 
 ## Roadmap
 
 - [x] One-command deploy, sleep, Postgres, custom domains, dashboard with cost estimate
 - [x] Sign-in by work email; personal invite links; access requests to Telegram
-- [x] Sign-in pages and emails in English and Russian
-- [ ] English CLI messages and CLI reference
-- [ ] `pip install small-cli` from PyPI
+- [x] English and Russian: CLI, sign-in pages, emails
+- [x] `pip install small-cli` from PyPI
 - [ ] “Share” button in the dashboard — no terminal needed
 - [ ] Email sign-in for the Streamlit template
 - [ ] Hosted mode — no Railway account needed
@@ -161,9 +161,9 @@ Full CLI reference (in Russian): [small-cli/README.md](small-cli/README.md).
 ## Development
 
 ```bash
-cd small-cli   && python -m unittest discover -s tests     # 113 tests (+ real FastAPI/Streamlit when installed)
-cd magic-link  && python -m unittest test_magic_link       # 50 tests
-cd magic-link  && node --test                              # 19 tests
+cd small-cli   && python -m unittest discover -s tests     # 120 tests (+ real FastAPI/Streamlit when installed)
+cd magic-link  && python -m unittest test_magic_link       # 51 tests
+cd magic-link  && node --test                              # 20 tests
 ```
 
 GitHub Actions runs everything on Windows, macOS and Linux. See [CONTRIBUTING.md](CONTRIBUTING.md) and the

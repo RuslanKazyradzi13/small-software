@@ -7,6 +7,9 @@ const { test, before, after, mock } = require('node:test');
 
 const magicLink = require('./magic-link');
 
+// Проверки читают русские строки лога; английские — в тесте про OWNER_LANG.
+process.env.OWNER_LANG = 'ru';
+
 const TOKEN = 's3cret-token';
 const COOKIE = 'small_access=' + crypto.createHmac('sha256', TOKEN).update('magic-link-cookie').digest('hex');
 
@@ -174,6 +177,36 @@ test('запрос доступа приходит владельцу в Telegra
   assert.equal(messages[0].body.parse_mode, undefined);
   for (const part of ['127.0.0.1', 'bob@example.com', '203.0.113.7', 'small access add']) {
     assert.ok(messages[0].body.text.includes(part), part);
+  }
+});
+
+test('владелец читает лог и Telegram на своём языке (OWNER_LANG)', async (t) => {
+  const messages = [];
+  const inbox = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => { messages.push(JSON.parse(body)); res.end('{"ok":true,"result":{}}'); });
+  });
+  await new Promise((resolve) => inbox.listen(0, '127.0.0.1', resolve));
+  t.after(() => inbox.close());
+  const log = mock.method(console, 'log', () => {});
+  t.after(() => log.mock.restore());
+  setEnv(t, { OWNER_LANG: 'en', TELEGRAM_BOT_TOKEN: '123:abc', TELEGRAM_CHAT_ID: '42',
+    TELEGRAM_API_URL: `http://127.0.0.1:${inbox.address().port}` });
+  for (const [lang, words, login] of [
+    ['en', ['Access request to', 'Grant access: small access add'], '[magic-link] signed in by link (bob)'],
+    ['ru', ['Запрос доступа к', 'Выдать доступ: small access add'], '[magic-link] вход по ссылке (bob)'],
+  ]) {
+    process.env.OWNER_LANG = lang;
+    messages.length = 0;
+    const s = await serve({ tokens: 'bob:' + TOKEN, requestUrl: '' });
+    const url = `http://127.0.0.1:${s.address().port}`;
+    await fetch(`${url}/_access/request`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'contact=x' });
+    await fetch(`${url}/?token=${TOKEN}`, { redirect: 'manual' });
+    s.close();
+    for (let i = 0; i < 50 && !messages.length; i++) await new Promise((r) => setTimeout(r, 50));
+    for (const word of words) assert.ok(messages[0].text.includes(word), word);
+    assert.ok(log.mock.calls.some((c) => String(c.arguments[0]).startsWith(login)), login);
   }
 });
 

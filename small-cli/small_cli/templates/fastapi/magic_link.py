@@ -25,6 +25,8 @@
     PUBLIC_URL          адрес приложения для ссылок в письмах (например, свой домен). Не задан — берётся
                         RAILWAY_PUBLIC_DOMAIN; локально — localhost.
     ACCESS_LANG         язык страниц и писем: ru, en или auto (по умолчанию — по заголовку Accept-Language)
+    OWNER_LANG          язык сообщений для владельца — строк лога и уведомлений в Telegram: en (по умолчанию) или ru.
+                        small deploy задаёт его по языку small.
     ACCESS_TOKEN        токены ссылок-приглашений через запятую, можно с именами: "alice:токен1,bob:токен2".
                         Убрали чей-то токен — его ссылка и выданные по ней куки перестают работать.
     ACCESS_REQUEST_URL  куда ведёт кнопка «Запросить доступ» (mailto:..., https://t.me/...), если нет входа по
@@ -174,7 +176,8 @@ class _Gate:
         self.emails = parse_emails(os.environ.get("ACCESS_EMAILS", "") if emails is None else emails)
         secret = os.environ.get("SESSION_SECRET", "").strip() if secret is None else secret
         if self.emails and not secret:
-            _log("[magic-link] SESSION_SECRET не задан: после перезапуска приложения всем придётся войти заново")
+            _log(_for_owner("[magic-link] SESSION_SECRET is not set: everyone will have to sign in again after a restart",
+                        "[magic-link] SESSION_SECRET не задан: после перезапуска приложения всем придётся войти заново"))
         self.secret = (secret or secrets.token_hex(32)).encode("utf-8")
         self.request_url = os.environ.get("ACCESS_REQUEST_URL", "") if request_url is None else request_url
         self.cookie_name = cookie_name
@@ -185,10 +188,13 @@ class _Gate:
         self.attempts = {}  # ограничение частоты писем: ключ -> [время запросов]
         self.lock = threading.Lock()
         if not self.entries and not self.emails:
-            _log("[magic-link] ACCESS_TOKEN и ACCESS_EMAILS не заданы: доступ закрыт для всех")
+            _log(_for_owner("[magic-link] neither ACCESS_TOKEN nor ACCESS_EMAILS is set: nobody can get in",
+                        "[magic-link] ACCESS_TOKEN и ACCESS_EMAILS не заданы: доступ закрыт для всех"))
         if self.emails and not _mail_mode():
-            _log("[magic-link] почта не настроена (RESEND_API_KEY или SMTP_URL): письма для входа не уйдут. "
-                 "Подключить: small mail")
+            _log(_for_owner("[magic-link] email is not set up (RESEND_API_KEY or SMTP_URL): sign-in emails will not be "
+                        "sent. Set it up: small mail",
+                        "[magic-link] почта не настроена (RESEND_API_KEY или SMTP_URL): письма для входа не уйдут. "
+                        "Подключить: small mail"))
 
     # --- общий обработчик: None — пропустить в приложение, иначе (код, заголовки, тело) ---
 
@@ -300,7 +306,8 @@ class _Gate:
         if self.email_allowed(email):
             app_url = self.public_url(host, https, base)
             if app_url is None:
-                _log("[magic-link] письмо для входа не отправлено: неизвестен адрес приложения. Задайте PUBLIC_URL")
+                _log(_for_owner("[magic-link] sign-in email not sent: the app's address is unknown. Set PUBLIC_URL",
+                            "[magic-link] письмо для входа не отправлено: неизвестен адрес приложения. Задайте PUBLIC_URL"))
             else:
                 link = app_url + VERIFY_PATH + "?" + urlencode({"t": self.sign("login", {
                     "e": email, "x": int(time.time()) + LINK_TTL, "n": secrets.token_urlsafe(9)})})
@@ -327,7 +334,7 @@ class _Gate:
             if data["n"] in self.used_links:
                 return self.respond(403, "expired", base, lang=lang)
             self.used_links[data["n"]] = data["x"]
-        _log("[magic-link] вход по почте (%s), ip=%s" % (email, ip))
+        _log(_for_owner("[magic-link] signed in by email (%s), ip=%s", "[magic-link] вход по почте (%s), ip=%s") % (email, ip))
         session = "e." + self.sign("session", {"e": email, "x": int(time.time()) + self.max_age})
         return 302, [("Location", (base or "") + "/"), ("Set-Cookie", self._cookie(session, https)),
                      ("Cache-Control", "no-store")], b""
@@ -393,15 +400,17 @@ class _Gate:
         _log("[access-request] contact=%r ip=%s ua=%r" % (contact, ip, user_agent[:200]))
         token, chat = self.telegram
         if token and chat:
-            hint = "small access add " + (contact if EMAIL_RE.match(contact) else "ИМЯ")
-            text = "🔑 Запрос доступа к %s\nКонтакт: %s\nIP: %s\n\nВыдать доступ: %s" % (
-                host or "приложению", contact or "—", ip or "—", hint)
+            hint = "small access add " + (contact if EMAIL_RE.match(contact) else _for_owner("NAME", "ИМЯ"))
+            text = _for_owner("🔑 Access request to %s\nContact: %s\nIP: %s\n\nGrant access: %s",
+                          "🔑 Запрос доступа к %s\nКонтакт: %s\nIP: %s\n\nВыдать доступ: %s") % (
+                host or _for_owner("the app", "приложению"), contact or "—", ip or "—", hint)
             # В фоне: пользователь не ждёт Telegram. Без parse_mode — текст из формы ничего не разметит.
             threading.Thread(target=_send_telegram, args=(token, chat, text), daemon=True).start()
 
     @staticmethod
     def log_login(name, ip):
-        _log("[magic-link] вход по ссылке%s, ip=%s" % (" (%s)" % name if name else "", ip))
+        _log(_for_owner("[magic-link] signed in by link%s, ip=%s", "[magic-link] вход по ссылке%s, ip=%s") % (
+            " (%s)" % name if name else "", ip))
 
 
 class MagicLink:
@@ -529,16 +538,17 @@ def _mail_mode():
 def _send_login_mail(email, link, app_name, lang=DEFAULT_LANG):
     mode = _mail_mode()
     if mode == "log":
-        _log("[magic-link] ссылка для входа (%s): %s" % (email, link))
+        _log(_for_owner("[magic-link] sign-in link (%s): %s", "[magic-link] ссылка для входа (%s): %s") % (email, link))
         return
     ui = UI[lang if lang in UI else DEFAULT_LANG]
     body = '<p>%s</p><p><a href="%s">%s</a></p><p style="color:#666">%s</p>' % (
         ui["mail_intro"] % html.escape(app_name), html.escape(link), ui["mail_link"], ui["mail_note"])
     try:
         send_mail(email, ui["subject"] % app_name, ui["mail_text"] % (app_name, link), body)
-        _log("[magic-link] письмо для входа отправлено: %s" % email)
+        _log(_for_owner("[magic-link] sign-in email sent: %s", "[magic-link] письмо для входа отправлено: %s") % email)
     except Exception as e:  # письмо — не повод ронять приложение; ключи и пароли в лог не пишем
-        _log("[magic-link] не удалось отправить письмо для входа на %s: %s" % (email, _describe(e)))
+        _log(_for_owner("[magic-link] could not send the sign-in email to %s: %s",
+                    "[magic-link] не удалось отправить письмо для входа на %s: %s") % (email, _describe(e)))
 
 
 def send_mail(to, subject, text, html_body):
@@ -573,7 +583,8 @@ def send_mail(to, subject, text, html_body):
                 server.login(unquote(url.username), unquote(url.password or ""))
             server.send_message(message)
     else:
-        raise RuntimeError("почта не настроена: задайте RESEND_API_KEY или SMTP_URL")
+        raise RuntimeError(_for_owner("email is not set up: set RESEND_API_KEY or SMTP_URL",
+                                  "почта не настроена: задайте RESEND_API_KEY или SMTP_URL"))
 
 
 def _describe(error):
@@ -593,7 +604,13 @@ def _send_telegram(token, chat, text):
     try:
         urllib.request.urlopen(request, timeout=10).close()
     except Exception as e:  # уведомление — не повод ронять запрос; токен бота в лог не пишем
-        _log("[magic-link] не удалось отправить запрос доступа в Telegram: %s" % type(e).__name__)
+        _log(_for_owner("[magic-link] could not send the access request to Telegram: %s",
+                    "[magic-link] не удалось отправить запрос доступа в Telegram: %s") % type(e).__name__)
+
+
+def _for_owner(en, ru):
+    """Текст для владельца (лог, Telegram) — на его языке, OWNER_LANG. Посетитель видит язык своего браузера."""
+    return ru if os.environ.get("OWNER_LANG", "").strip().lower()[:2] == "ru" else en
 
 
 def _log(message):

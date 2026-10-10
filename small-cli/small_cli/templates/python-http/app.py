@@ -1,7 +1,7 @@
-"""Микро-приложение, созданное `small init`. Деплой: `small deploy`.
+"""A small app created by `small init`. Deploy it with `small deploy`.
 
-Доступ по ссылке-приглашению https://<домен>/?token=<ACCESS_TOKEN>: токен лежит в small.json,
-проверку делает magic_link.py. Свой код пишите в app() — это обычное WSGI-приложение.
+Who gets in is decided by magic_link.py: people you invite by work email (`small access add ivan@company.com`)
+or with a personal invite link (`small access add bob`). Write your own code in app() — it is a plain WSGI app.
 """
 
 import os
@@ -12,15 +12,15 @@ from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 from magic_link import MagicLink
 
 PAGE = """<!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>small app</title>
 </head>
 <body style="font-family: system-ui, sans-serif; text-align: center; padding: 48px 16px;">
-  <h1>🚀 Работает!</h1>
-  <p>Приложение создано командой <code>small init</code>. Измените <code>app.py</code> и выполните <code>small deploy</code>.</p>
+  <h1>🚀 It works!</h1>
+  <p>This app was created by <code>small init</code>. Edit <code>app.py</code> and run <code>small deploy</code>.</p>
 </body>
 </html>
 """.encode("utf-8")
@@ -37,7 +37,7 @@ class ThreadingServer(ThreadingMixIn, WSGIServer):
 
 class Handler(WSGIRequestHandler):
     def log_message(self, format, *args):
-        # Не пишем в логи ?token=... (ссылка-приглашение) и ?t=... (ссылка для входа из письма).
+        # Keep ?token=... (invite link) and ?t=... (sign-in link from an email) out of the logs.
         super().log_message(format, *(re.sub(r"\b(token|t)=[^&\s]*", r"\1=***", str(a)) for a in args))
 
 

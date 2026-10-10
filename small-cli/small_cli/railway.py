@@ -8,6 +8,7 @@ import urllib.request
 from datetime import datetime, timezone
 
 from . import __version__
+from .i18n import tr
 
 DEFAULT_API_URL = "https://backboard.railway.com"
 TOKEN_ENV_VARS = ("RAILWAY_API_TOKEN", "RAILWAY_TOKEN")
@@ -46,11 +47,13 @@ class Railway:
         except urllib.error.HTTPError as e:
             raise RailwayError("HTTP %d: %s" % (e.code, _error_text(e.read()))) from None
         except OSError as e:  # URLError, таймауты, разрыв соединения
-            raise RailwayError("нет связи с %s: %s" % (self.base_url, getattr(e, "reason", e))) from None
+            raise RailwayError(tr("cannot reach %s: %s", "нет связи с %s: %s")
+                               % (self.base_url, getattr(e, "reason", e))) from None
         try:
             return json.loads(raw or b"{}")
         except ValueError:
-            raise RailwayError("неожиданный ответ сервера: %s" % _error_text(raw)) from None
+            raise RailwayError(tr("unexpected server response: %s", "неожиданный ответ сервера: %s")
+                               % _error_text(raw)) from None
 
     def graphql(self, query, variables=None, timeout=60):
         body = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
@@ -79,7 +82,7 @@ class Railway:
         project = data["projectCreate"]
         envs = [edge["node"] for edge in project["environments"]["edges"]]
         if not envs:
-            raise RailwayError("у созданного проекта нет окружений")
+            raise RailwayError(tr("the new project has no environments", "у созданного проекта нет окружений"))
         env = next((e for e in envs if e["name"] == "production"), envs[0])
         return project["id"], env["id"]
 
@@ -131,7 +134,8 @@ class Railway:
             self.base_url, project_id, environment_id, urllib.parse.urlencode(params))
         res = self._post(url, tarball, "application/gzip", timeout=600)
         if not res.get("deploymentId"):
-            raise RailwayError("Railway не вернул deploymentId: %s" % res)
+            raise RailwayError(tr("Railway did not return a deploymentId: %s",
+                                  "Railway не вернул deploymentId: %s") % res)
         return res
 
     def create_domain(self, service_id, environment_id, port=None):
@@ -356,7 +360,7 @@ def _error_text(raw):
     try:
         payload = json.loads(text)
     except ValueError:
-        return text[:300] or "(пустой ответ)"
+        return text[:300] or tr("(empty response)", "(пустой ответ)")
     if isinstance(payload, dict):
         if payload.get("message"):
             return payload["message"]

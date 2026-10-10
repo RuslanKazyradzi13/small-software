@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import STATE_FILE, load_state
+from .i18n import tr
 from .railway import token_from_env
 
 
@@ -39,7 +40,7 @@ def confirm(prompt):
 def app_dir(path):
     root = Path(path).resolve()
     if not root.is_dir():
-        raise CliError("папка не найдена: %s" % root)
+        raise CliError(tr("folder not found: %s", "папка не найдена: %s") % root)
     return root
 
 
@@ -50,15 +51,18 @@ def is_linked(state):
 def linked_state(root):
     state = load_state(root / STATE_FILE)
     if not is_linked(state):
-        raise CliError("%s ещё не задеплоено (нет %s). Сначала: small deploy" % (root, STATE_FILE))
+        raise CliError(tr("%s has not been deployed yet (no %s). Run `small deploy` first",
+                          "%s ещё не задеплоено (нет %s). Сначала: small deploy") % (root, STATE_FILE))
     return state
 
 
 def require_token():
     token = token_from_env()
     if not token:
-        raise CliError("не задан токен Railway. Создайте его в Railway → Account Settings → Tokens "
-                       "и положите в переменную окружения RAILWAY_API_TOKEN.")
+        raise CliError(tr("Railway token is not set. Create one in Railway → Account Settings → Tokens "
+                          "and put it in the RAILWAY_API_TOKEN environment variable.",
+                          "не задан токен Railway. Создайте его в Railway → Account Settings → Tokens "
+                          "и положите в переменную окружения RAILWAY_API_TOKEN."))
     return token
 
 
@@ -68,9 +72,10 @@ def slugify(name):
 
 
 def human_size(size):
-    for unit in ("Б", "КБ", "МБ"):
-        if size < 1024 or unit == "МБ":
-            return ("%d %s" if unit == "Б" else "%.1f %s") % (size, unit)
+    units = (tr("B", "Б"), tr("KB", "КБ"), tr("MB", "МБ"))
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return ("%d %s" if unit == units[0] else "%.1f %s") % (size, unit)
         size /= 1024.0
 
 

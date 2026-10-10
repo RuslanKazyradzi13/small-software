@@ -25,6 +25,8 @@
  *   ACCESS_REQUEST_URL  куда ведёт кнопка «Запросить доступ», если нет входа по почте (mailto:..., https://t.me/...).
  *   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  запросы доступа приходят владельцу в Telegram (small notify telegram).
  *   ACCESS_LANG         язык страниц и писем: ru, en или auto (по умолчанию — по заголовку Accept-Language).
+ *   OWNER_LANG          язык сообщений для владельца — строк лога и уведомлений в Telegram: en (по умолчанию) или ru.
+ *                       small deploy задаёт его по языку small.
  */
 
 const crypto = require('node:crypto');
@@ -123,7 +125,8 @@ function magicLink(options = {}) {
   const emails = parseEmails(options.emails ?? process.env.ACCESS_EMAILS ?? '');
   let secret = String(options.secret ?? process.env.SESSION_SECRET ?? '').trim();
   if (emails.size && !secret) {
-    console.log('[magic-link] SESSION_SECRET не задан: после перезапуска приложения всем придётся войти заново');
+    console.log(ownerText('[magic-link] SESSION_SECRET is not set: everyone will have to sign in again after a restart',
+      '[magic-link] SESSION_SECRET не задан: после перезапуска приложения всем придётся войти заново'));
   }
   secret = secret || crypto.randomBytes(32).toString('hex');
   const requestUrl = options.requestUrl ?? process.env.ACCESS_REQUEST_URL ?? '';
@@ -135,9 +138,13 @@ function magicLink(options = {}) {
   const telegramChat = String(process.env.TELEGRAM_CHAT_ID || '').trim();
   const usedLinks = new Map(); // одноразовые ссылки для входа: nonce -> срок (мс)
   const attempts = new Map(); // ограничение частоты писем: ключ -> [время запросов]
-  if (!entries.length && !emails.size) console.log('[magic-link] ACCESS_TOKEN и ACCESS_EMAILS не заданы: доступ закрыт для всех');
+  if (!entries.length && !emails.size) {
+    console.log(ownerText('[magic-link] neither ACCESS_TOKEN nor ACCESS_EMAILS is set: nobody can get in',
+      '[magic-link] ACCESS_TOKEN и ACCESS_EMAILS не заданы: доступ закрыт для всех'));
+  }
   if (emails.size && !mailMode()) {
-    console.log('[magic-link] почта не настроена (RESEND_API_KEY): письма для входа не уйдут. Подключить: small mail');
+    console.log(ownerText('[magic-link] email is not set up (RESEND_API_KEY): sign-in emails will not be sent. Set it up: small mail',
+      '[magic-link] почта не настроена (RESEND_API_KEY): письма для входа не уйдут. Подключить: small mail'));
   }
 
   const base = (req) => req.baseUrl || '';
@@ -187,14 +194,17 @@ function magicLink(options = {}) {
     if (!(telegramToken && telegramChat)) return;
     // Без await: пользователь не ждёт Telegram. Без parse_mode — текст из формы ничего не разметит.
     const api = String(process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/+$/, '');
-    const hint = 'small access add ' + (EMAIL_RE.test(entry.contact) ? entry.contact : 'ИМЯ');
-    const text = `🔑 Запрос доступа к ${req.headers.host || 'приложению'}\nКонтакт: ${entry.contact || '—'}\nIP: ${entry.ip || '—'}`
-      + `\n\nВыдать доступ: ${hint}`;
+    const hint = 'small access add ' + (EMAIL_RE.test(entry.contact) ? entry.contact : ownerText('NAME', 'ИМЯ'));
+    const host = req.headers.host || ownerText('the app', 'приложению');
+    const text = ownerText(
+      `🔑 Access request to ${host}\nContact: ${entry.contact || '—'}\nIP: ${entry.ip || '—'}\n\nGrant access: ${hint}`,
+      `🔑 Запрос доступа к ${host}\nКонтакт: ${entry.contact || '—'}\nIP: ${entry.ip || '—'}\n\nВыдать доступ: ${hint}`);
     fetch(`${api}/bot${telegramToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: telegramChat, text }),
-    }).catch((e) => console.log('[magic-link] не удалось отправить запрос доступа в Telegram: ' + e.name));
+    }).catch((e) => console.log(ownerText('[magic-link] could not send the access request to Telegram: ',
+      '[magic-link] не удалось отправить запрос доступа в Telegram: ') + e.name));
   }
 
   function emailAllowed(email) {
@@ -263,7 +273,8 @@ function magicLink(options = {}) {
       if (emailAllowed(email)) {
         const appUrl = publicUrl(req);
         if (!appUrl) {
-          console.log('[magic-link] письмо для входа не отправлено: неизвестен адрес приложения. Задайте PUBLIC_URL');
+          console.log(ownerText("[magic-link] sign-in email not sent: the app's address is unknown. Set PUBLIC_URL",
+            '[magic-link] письмо для входа не отправлено: неизвестен адрес приложения. Задайте PUBLIC_URL'));
         } else {
           const token = sign('login', { e: email, x: Math.floor(Date.now() / 1000) + LINK_TTL, n: crypto.randomBytes(9).toString('base64url') });
           // Без await: ответ не ждёт почту и одинаков для известных и неизвестных адресов.
@@ -287,7 +298,8 @@ function magicLink(options = {}) {
       const now = Date.now();
       for (const [nonce, expires] of usedLinks) if (expires < now) usedLinks.delete(nonce);
       usedLinks.set(data.n, data.x * 1000);
-      console.log(`[magic-link] вход по почте (${data.e}), ip=${clientIp(req)}`);
+      console.log(ownerText(`[magic-link] signed in by email (${data.e}), ip=${clientIp(req)}`,
+        `[magic-link] вход по почте (${data.e}), ip=${clientIp(req)}`));
       const session = 'e.' + sign('session', { e: data.e, x: Math.floor(now / 1000) + maxAge });
       res.writeHead(302, { Location: base(req) + '/', 'Set-Cookie': cookie(session, isHttps(req)), 'Cache-Control': 'no-store' });
       return res.end();
@@ -316,7 +328,8 @@ function magicLink(options = {}) {
     if (token !== null) {
       const name = owner(token, tokens);
       if (name === null) return page(req, res, 403, 'invalid');
-      console.log('[magic-link] вход по ссылке' + (name ? ` (${name})` : '') + ', ip=' + clientIp(req));
+      console.log(ownerText('[magic-link] signed in by link', '[magic-link] вход по ссылке')
+        + (name ? ` (${name})` : '') + ', ip=' + clientIp(req));
       // Убираем токен из адреса, чтобы он не оставался в истории браузера и не утекал через Referer.
       // Ведущие слэши схлопываем: Location "//host" был бы открытым редиректом.
       const full = new URL(req.originalUrl || req.url, 'http://localhost');
@@ -365,13 +378,13 @@ function mailMode() {
 
 async function sendLoginMail(email, link, appName, lang = DEFAULT_LANG) {
   if (mailMode() === 'log') {
-    console.log(`[magic-link] ссылка для входа (${email}): ${link}`);
+    console.log(ownerText(`[magic-link] sign-in link (${email}): ${link}`, `[magic-link] ссылка для входа (${email}): ${link}`));
     return;
   }
   const ui = UI[LANGS.includes(lang) ? lang : DEFAULT_LANG];
   const key = String(process.env.RESEND_API_KEY || '').trim();
   try {
-    if (!key) throw new Error('почта не настроена: задайте RESEND_API_KEY');
+    if (!key) throw new Error(ownerText('email is not set up: set RESEND_API_KEY', 'почта не настроена: задайте RESEND_API_KEY'));
     const api = String(process.env.RESEND_API_URL || 'https://api.resend.com').replace(/\/+$/, '');
     const response = await fetch(`${api}/emails`, {
       method: 'POST',
@@ -386,11 +399,17 @@ async function sendLoginMail(email, link, appName, lang = DEFAULT_LANG) {
       }),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status} ${(await response.text()).slice(0, 200)}`);
-    console.log(`[magic-link] письмо для входа отправлено: ${email}`);
+    console.log(ownerText(`[magic-link] sign-in email sent: ${email}`, `[magic-link] письмо для входа отправлено: ${email}`));
   } catch (e) {
     // Письмо — не повод ронять приложение; ключ в лог не пишем.
-    console.log(`[magic-link] не удалось отправить письмо для входа на ${email}: ${e.message}`);
+    console.log(ownerText(`[magic-link] could not send the sign-in email to ${email}: `,
+      `[magic-link] не удалось отправить письмо для входа на ${email}: `) + e.message);
   }
+}
+
+// Текст для владельца (лог, Telegram) — на его языке, OWNER_LANG. Посетитель видит язык своего браузера.
+function ownerText(en, ru) {
+  return String(process.env.OWNER_LANG || '').trim().toLowerCase().startsWith('ru') ? ru : en;
 }
 
 // В куке лежит не сам токен, а производное от него: убрали токен из ACCESS_TOKEN — его куки больше не подходят.

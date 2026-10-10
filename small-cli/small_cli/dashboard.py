@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlparse
 from . import access
 from .archive import ALWAYS_IGNORED
 from .config import CONFIG_FILE, STATE_FILE, ConfigError, load_config, load_state
+from .i18n import lang, tr
 from .railway import Railway, RailwayError
 
 DEFAULT_PORT = 3000
@@ -87,7 +88,7 @@ def describe_app(folder, root):
             if isinstance(domain, str) and DOMAIN_RE.match(domain):
                 app["url"] = "https://" + domain
             else:
-                app["errors"].append("%s: некорректный домен %r" % (STATE_FILE, domain))
+                app["errors"].append(tr("%s: invalid domain %r", "%s: некорректный домен %r") % (STATE_FILE, domain))
     return app
 
 
@@ -198,7 +199,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         path, params = url.path, {k: v[-1] for k, v in parse_qs(url.query).items()}
         if path == "/":
-            return self._send(200, "text/html; charset=utf-8", PAGE.encode("utf-8"))
+            return self._send(200, "text/html; charset=utf-8", render_page().encode("utf-8"))
         if path == "/open":
             return self._open(params.get("app"))
         if path == "/api/logs":
@@ -223,7 +224,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         """Редирект на приложение по ссылке-приглашению. Токен уходит только в адресную строку браузера."""
         app = self._find(rel_path)
         if not app or not app["url"]:
-            return self._send(404, "text/plain; charset=utf-8", "Приложение не найдено или не задеплоено".encode("utf-8"))
+            return self._send(404, "text/plain; charset=utf-8",
+                              tr("App not found or not deployed", "Приложение не найдено или не задеплоено").encode("utf-8"))
         folder = Path(app["path"])
         try:
             entries, _ = access.current(folder, load_state(folder / STATE_FILE))
@@ -239,9 +241,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _logs(self, rel_path, build):
         app = self._find(rel_path)
         if not app or not app["serviceId"]:
-            return self._json(404, {"error": "приложение не найдено или не задеплоено"})
+            return self._json(404, {"error": tr("app not found or not deployed", "приложение не найдено или не задеплоено")})
         if not self.server.token:
-            return self._json(400, {"error": "нужен RAILWAY_API_TOKEN: перезапустите small dashboard с ним"})
+            return self._json(400, {"error": tr("RAILWAY_API_TOKEN is required: restart small dashboard with it set",
+                                                "нужен RAILWAY_API_TOKEN: перезапустите small dashboard с ним")})
         try:
             api = Railway(self.server.token)
             deployment = api.latest_deployment(app["serviceId"], app["environmentId"], timeout=LIVE_TIMEOUT)
@@ -270,8 +273,97 @@ class DashboardHandler(BaseHTTPRequestHandler):
         pass
 
 
-PAGE = r"""<!doctype html>
-<html lang="ru">
+def _page_texts():
+    """Тексты, которые собирает JS страницы, на текущем языке: уходят в неё объектом T.
+
+    {name} — подстановки для fmt() в JS; apps — формы для plural(): три по-русски, две по-английски.
+    """
+    return {
+        "locale": tr("en-US", "ru-RU"),  # для toLocaleString / toLocaleTimeString
+        "linked": tr("Linked to Railway", "Привязан к Railway"),
+        "notDeployed": tr("Not deployed", "Не задеплоен"),
+        "deploy": {  # подсказка к статусу последнего деплоя; ключи — статусы Railway API
+            "SUCCESS": tr("running", "работает"),
+            "SLEEPING": tr("sleeping", "спит"),
+            "QUEUED": tr("queued", "в очереди"),
+            "WAITING": tr("waiting", "ожидает"),
+            "INITIALIZING": tr("starting", "запускается"),
+            "BUILDING": tr("building", "сборка"),
+            "DEPLOYING": tr("deploying", "выкатывается"),
+            "FAILED": tr("build failed", "сборка упала"),
+            "CRASHED": tr("app crashed", "приложение упало"),
+            "REMOVED": tr("removed", "удалён"),
+            "REMOVING": tr("removing", "удаляется"),
+            "SKIPPED": tr("skipped", "пропущен"),
+            "NEEDS_APPROVAL": tr("awaiting approval", "ждёт подтверждения"),
+        },
+        "lastDeploy": tr("Latest deploy on Railway", "Последний деплой в Railway"),
+        "sleepBadge": tr("auto-sleep", "засыпает"),
+        "sleepHint": tr("Sleep mode: with no requests the app goes to sleep and uses no resources (small sleep)",
+                        "Режим сна: без запросов приложение засыпает и не тратит ресурсы (small sleep)"),
+        "notDeployedYet": tr("Not deployed yet: small deploy", "Ещё не деплоилось: small deploy"),
+        "open": tr("Open via invite link", "Открыть по ссылке"),
+        "openHint": tr("Opens right away with the access token, skipping the invite-only screen",
+                       "Откроется сразу с токеном доступа — без экрана «Доступ по приглашению»"),
+        "logs": tr("Logs", "Логи"),
+        "needToken": tr("RAILWAY_API_TOKEN is required: restart small dashboard with it set",
+                        "Нужен RAILWAY_API_TOKEN: перезапустите small dashboard с ним"),
+        "costAtLoad": tr("≈ {cost}/mo at current load", "≈ {cost}/мес при текущей нагрузке"),
+        "costHint": tr("Average load over the past week (CPU, memory, volumes; databases included) × Railway prices. "
+                       "Excludes egress and the plan's free allowance — see the exact amount in Railway → Usage",
+                       "Средняя нагрузка за неделю (CPU, память, тома; вместе с базами) × тарифы Railway. "
+                       "Без трафика и бесплатного лимита тарифа — точная сумма в Railway → Usage"),
+        "variables": tr("Variables:", "Переменные:"),
+        "logsTitle": tr("Logs · {app}", "Логи · {app}"),
+        "loading": tr("Loading…", "Загрузка…"),
+        "noDeploys": tr("This service has no deploys yet", "У сервиса ещё нет деплоев"),
+        "logsMeta": tr("Deploy {id} · {status} · lines: {count}", "Деплой {id} · {status} · строк: {count}"),
+        "logEmpty": tr("Log is empty", "Лог пуст"),
+        "logsFailed": tr("Couldn't load logs: {error}", "Не удалось получить лог: {error}"),
+        "live": {
+            "on": tr("deploy statuses from Railway", "статусы деплоя из Railway"),
+            "off": tr("offline mode: set RAILWAY_API_TOKEN for live statuses",
+                      "офлайн-режим: задайте RAILWAY_API_TOKEN для живых статусов"),
+            "error": tr("Railway didn't respond, showing local data", "Railway не ответил, показаны локальные данные"),
+        },
+        "perMonth": tr("/mo", "/мес"),
+        "apps": tr(["app", "apps"], ["приложение", "приложения", "приложений"]),
+        "summary": tr("{count} {apps} · {linked} linked to Railway{total} · updated at {time}",
+                      "{count} {apps} · {linked} привязано к Railway{total} · обновлено в {time}"),
+        "summaryEmpty": tr("Updated at {time}", "Обновлено в {time}"),
+        "listFailed": tr("Couldn't load the app list: {error}. Is small dashboard running?",
+                         "Не удалось получить список: {error}. Запущен ли small dashboard?"),
+    }
+
+
+def render_page():
+    """HTML дашборда на текущем языке: тексты разметки подставляются в {{name}}, тексты для JS — объектом T."""
+    code = '<code class="font-mono">%s</code>'
+    values = {
+        "lang": lang(),
+        "apps_in": tr("Micro-apps in", "Микро-приложения в"),
+        "refresh": tr("Refresh", "Обновить"),
+        "no_apps": tr("No apps found", "Приложений не найдено"),
+        "no_app_folders": tr("There are no folders with %s or %s here.", "Здесь нет папок с %s или %s.")
+                          % (code % "small.json", code % ".small.json"),
+        "create_app": tr("Create an app: %s", "Создайте приложение: %s") % (code % "small init my-app"),
+        "tab_app": tr("App", "Приложение"),
+        "tab_build": tr("Build", "Сборка"),
+        "close": tr("Close", "Закрыть"),
+        # JSON внутри <script>: "</" экранируем, чтобы "</script>" в строке не закрыл тег раньше времени.
+        "texts": json.dumps(_page_texts(), ensure_ascii=False).replace("</", "<\\/"),
+    }
+    return re.sub(r"\{\{(\w+)\}\}", lambda m: values[m.group(1)], PAGE_TEMPLATE)
+
+
+# Внутри страницы комментариев нет: она уходит в браузер и на английском, поэтому заметки к ней — здесь.
+# - У #logs нет display-класса: Tailwind-класс вроде "flex" перебил бы атрибут hidden, и окно было бы видно сразу.
+# - DEPLOY_STATUS — тон бейджа живого статуса последнего деплоя из Railway; подпись к статусу — в T.deploy.
+# - ARROW вставляется через insertAdjacentHTML: это константа, не данные пользователя.
+# - Клик по #logs или #logs-backdrop — клик по затемнённому фону вокруг окна: окно закрывается.
+# - fmt() подставляет {name} за один проход: подставленные значения (сообщения об ошибках) повторно не разбираются.
+PAGE_TEMPLATE = r"""<!doctype html>
+<html lang="{{lang}}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -284,7 +376,7 @@ PAGE = r"""<!doctype html>
     <div class="min-w-0">
       <h1 class="text-2xl font-semibold tracking-tight">small dashboard</h1>
       <p class="mt-1 truncate text-sm text-stone-500 dark:text-stone-400">
-        Микро-приложения в <span id="root" class="font-mono"></span>
+        {{apps_in}} <span id="root" class="font-mono"></span>
       </p>
     </div>
     <button id="refresh" type="button"
@@ -293,7 +385,7 @@ PAGE = r"""<!doctype html>
         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/>
       </svg>
-      Обновить
+      {{refresh}}
     </button>
   </header>
 
@@ -301,27 +393,26 @@ PAGE = r"""<!doctype html>
   <ul id="apps" class="grid gap-3"></ul>
 
   <div id="empty" hidden class="rounded-xl border border-dashed border-stone-300 p-10 text-center dark:border-stone-700">
-    <p class="font-medium">Приложений не найдено</p>
+    <p class="font-medium">{{no_apps}}</p>
     <p class="mt-1 text-sm text-stone-500 dark:text-stone-400">
-      Здесь нет папок с <code class="font-mono">small.json</code> или <code class="font-mono">.small.json</code>.
-      Создайте приложение: <code class="font-mono">small init my-app</code>
+      {{no_app_folders}}
+      {{create_app}}
     </p>
   </div>
   <div id="error" hidden class="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"></div>
 </main>
 
-<!-- У #logs нет display-класса: Tailwind-класс вроде "flex" перебил бы атрибут hidden, и окно было бы видно сразу. -->
 <div id="logs" hidden class="fixed inset-0 z-10 bg-black/50">
  <div id="logs-backdrop" class="flex h-full items-center justify-center p-4">
   <div class="flex max-h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl bg-white shadow-xl dark:bg-stone-900">
     <div class="flex flex-wrap items-center gap-2 border-b border-stone-200 px-4 py-3 dark:border-stone-800">
       <h2 id="logs-title" class="mr-auto min-w-0 truncate font-semibold"></h2>
       <div class="inline-flex rounded-lg bg-stone-100 p-0.5 text-sm dark:bg-stone-800" role="tablist">
-        <button type="button" data-build="0" class="logs-tab rounded-md px-3 py-1">Приложение</button>
-        <button type="button" data-build="1" class="logs-tab rounded-md px-3 py-1">Сборка</button>
+        <button type="button" data-build="0" class="logs-tab rounded-md px-3 py-1">{{tab_app}}</button>
+        <button type="button" data-build="1" class="logs-tab rounded-md px-3 py-1">{{tab_build}}</button>
       </div>
-      <button id="logs-refresh" type="button" class="rounded-lg px-3 py-1 text-sm hover:bg-stone-100 dark:hover:bg-stone-800">Обновить</button>
-      <button id="logs-close" type="button" aria-label="Закрыть" class="rounded-lg px-2 py-1 text-lg leading-none hover:bg-stone-100 dark:hover:bg-stone-800">×</button>
+      <button id="logs-refresh" type="button" class="rounded-lg px-3 py-1 text-sm hover:bg-stone-100 dark:hover:bg-stone-800">{{refresh}}</button>
+      <button id="logs-close" type="button" aria-label="{{close}}" class="rounded-lg px-2 py-1 text-lg leading-none hover:bg-stone-100 dark:hover:bg-stone-800">×</button>
     </div>
     <p id="logs-meta" class="px-4 pt-2 text-xs text-stone-500 dark:text-stone-400"></p>
     <pre id="logs-body" class="m-0 flex-1 overflow-auto whitespace-pre-wrap break-all px-4 py-3 font-mono text-xs leading-relaxed"></pre>
@@ -330,6 +421,7 @@ PAGE = r"""<!doctype html>
 </div>
 
 <script>
+const T = {{texts}};
 const $ = (id) => document.getElementById(id);
 
 function el(tag, className, text) {
@@ -339,7 +431,13 @@ function el(tag, className, text) {
   return node;
 }
 
-function plural(n, one, few, many) {
+function fmt(template, values) {
+  return template.replace(/\{(\w+)\}/g, (match, key) => (key in values ? String(values[key]) : match));
+}
+
+function plural(n, forms) {
+  if (forms.length < 3) return n === 1 ? forms[0] : forms[1];
+  const [one, few, many] = forms;
   const m10 = n % 10, m100 = n % 100;
   if (m10 === 1 && m100 !== 11) return one;
   if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
@@ -347,11 +445,10 @@ function plural(n, one, few, many) {
 }
 
 const STATUS = {
-  linked: ["Привязан к Railway", "bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-400/30", "bg-emerald-500"],
-  not_deployed: ["Не задеплоен", "bg-stone-100 text-stone-600 ring-stone-500/20 dark:bg-stone-800 dark:text-stone-300 dark:ring-stone-400/20", "bg-stone-400"],
+  linked: [T.linked, "bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-400/30", "bg-emerald-500"],
+  not_deployed: [T.notDeployed, "bg-stone-100 text-stone-600 ring-stone-500/20 dark:bg-stone-800 dark:text-stone-300 dark:ring-stone-400/20", "bg-stone-400"],
 };
 
-// Живой статус последнего деплоя из Railway: [подпись, классы бейджа, классы точки].
 const DEPLOY_TONES = {
   ok: ["bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-400/30", "bg-emerald-500"],
   busy: ["bg-amber-50 text-amber-800 ring-amber-600/20 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-400/30", "bg-amber-500 animate-pulse"],
@@ -360,21 +457,20 @@ const DEPLOY_TONES = {
   other: ["bg-stone-100 text-stone-600 ring-stone-500/20 dark:bg-stone-800 dark:text-stone-300 dark:ring-stone-400/20", "bg-stone-400"],
 };
 const DEPLOY_STATUS = {
-  SUCCESS: ["ok", "работает"], SLEEPING: ["idle", "спит"],
-  QUEUED: ["busy", "в очереди"], WAITING: ["busy", "ожидает"], INITIALIZING: ["busy", "запускается"],
-  BUILDING: ["busy", "сборка"], DEPLOYING: ["busy", "выкатывается"],
-  FAILED: ["bad", "сборка упала"], CRASHED: ["bad", "приложение упало"],
-  REMOVED: ["other", "удалён"], REMOVING: ["other", "удаляется"], SKIPPED: ["other", "пропущен"],
-  NEEDS_APPROVAL: ["other", "ждёт подтверждения"],
+  SUCCESS: "ok", SLEEPING: "idle",
+  QUEUED: "busy", WAITING: "busy", INITIALIZING: "busy", BUILDING: "busy", DEPLOYING: "busy",
+  FAILED: "bad", CRASHED: "bad",
+  REMOVED: "other", REMOVING: "other", SKIPPED: "other", NEEDS_APPROVAL: "other",
 };
 
 function deployBadge(deployment) {
-  const [tone, hint] = DEPLOY_STATUS[deployment.status] || ["other", ""];
+  const tone = DEPLOY_STATUS[deployment.status] || "other";
+  const hint = T.deploy[deployment.status] || "";
   const [badgeClass, dotClass] = DEPLOY_TONES[tone];
   const badge = el("span", "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 font-mono text-xs font-medium ring-1 ring-inset " + badgeClass);
   badge.append(el("span", "h-1.5 w-1.5 rounded-full " + dotClass), document.createTextNode(deployment.status));
-  const when = deployment.createdAt ? new Date(deployment.createdAt).toLocaleString("ru-RU") : "";
-  badge.title = "Последний деплой в Railway" + (hint ? ": " + hint : "") + (when ? ", " + when : "");
+  const when = deployment.createdAt ? new Date(deployment.createdAt).toLocaleString(T.locale) : "";
+  badge.title = T.lastDeploy + (hint ? ": " + hint : "") + (when ? ", " + when : "");
   return badge;
 }
 
@@ -383,7 +479,7 @@ const ARROW ='<svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="c
 
 function link(href, text) {
   const a = el("a", "inline-flex items-center gap-1 font-medium text-blue-600 hover:underline dark:text-blue-400", text);
-  a.insertAdjacentHTML("beforeend", ARROW);  // константа, не данные пользователя
+  a.insertAdjacentHTML("beforeend", ARROW);
   a.href = href;
   a.target = "_blank";
   a.rel = "noopener noreferrer";
@@ -400,8 +496,8 @@ function card(app) {
   const badges = el("div", "flex flex-wrap items-center gap-2");
   if (app.sleep) {
     const sleep = el("span", "inline-flex items-center rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-medium text-sky-700 " +
-      "ring-1 ring-inset ring-sky-600/20 dark:bg-sky-950 dark:text-sky-300 dark:ring-sky-400/30", "засыпает");
-    sleep.title = "Режим сна: без запросов приложение засыпает и не тратит ресурсы (small sleep)";
+      "ring-1 ring-inset ring-sky-600/20 dark:bg-sky-950 dark:text-sky-300 dark:ring-sky-400/30", T.sleepBadge);
+    sleep.title = T.sleepHint;
     badges.append(sleep);
   }
   if (app.deployment) badges.append(deployBadge(app.deployment));
@@ -412,25 +508,25 @@ function card(app) {
   const links = el("div", "mt-3 flex flex-wrap gap-x-5 gap-y-1 text-sm");
   if (app.url) links.append(link(app.url, app.url.replace("https://", "")));
   if (app.railwayUrl) links.append(link(app.railwayUrl, "Railway"));
-  if (!app.url && !app.railwayUrl) links.append(el("span", "text-stone-500 dark:text-stone-400", "Ещё не деплоилось: small deploy"));
+  if (!app.url && !app.railwayUrl) links.append(el("span", "text-stone-500 dark:text-stone-400", T.notDeployedYet));
   li.append(links);
 
   if (app.url || app.serviceId) {
     const actions = el("div", "mt-3 flex flex-wrap gap-2");
     if (app.url) {
-      const open = el("a", BUTTON, "Открыть по ссылке");
+      const open = el("a", BUTTON, T.open);
       open.href = "/open?app=" + encodeURIComponent(app.relPath);
       open.target = "_blank";
       open.rel = "noopener";
-      open.title = "Откроется сразу с токеном доступа — без экрана «Доступ по приглашению»";
+      open.title = T.openHint;
       actions.append(open);
     }
     if (app.serviceId) {
-      const logs = el("button", BUTTON, "Логи");
+      const logs = el("button", BUTTON, T.logs);
       logs.type = "button";
       if (liveMode === "off") {
         logs.disabled = true;
-        logs.title = "Нужен RAILWAY_API_TOKEN: перезапустите small dashboard с ним";
+        logs.title = T.needToken;
       }
       logs.addEventListener("click", () => openLogs(app));
       actions.append(logs);
@@ -439,16 +535,15 @@ function card(app) {
   }
 
   if (app.costUsd !== null && app.costUsd !== undefined) {
-    const cost = el("p", "mt-3 text-xs text-stone-500 dark:text-stone-400", "≈ " + usd(app.costUsd) + "/мес при текущей нагрузке");
-    cost.title = "Средняя нагрузка за неделю (CPU, память, тома; вместе с базами) × тарифы Railway. " +
-      "Без трафика и бесплатного лимита тарифа — точная сумма в Railway → Usage";
+    const cost = el("p", "mt-3 text-xs text-stone-500 dark:text-stone-400", fmt(T.costAtLoad, { cost: usd(app.costUsd) }));
+    cost.title = T.costHint;
     li.append(cost);
   }
   li.append(el("p", "mt-3 break-all font-mono text-xs text-stone-500 dark:text-stone-400", app.path));
 
   if (app.envNames.length) {
     const env = el("div", "mt-3 flex flex-wrap items-center gap-1.5");
-    env.append(el("span", "text-xs text-stone-500 dark:text-stone-400", "Переменные:"));
+    env.append(el("span", "text-xs text-stone-500 dark:text-stone-400", T.variables));
     for (const name of app.envNames) {
       env.append(el("span", "rounded bg-stone-100 px-1.5 py-0.5 font-mono text-xs dark:bg-stone-800", name));
     }
@@ -472,7 +567,7 @@ const logsState = { app: null, build: false };
 function openLogs(app) {
   logsState.app = app;
   logsState.build = false;
-  $("logs-title").textContent = "Логи · " + app.name;
+  $("logs-title").textContent = fmt(T.logsTitle, { app: app.name });
   $("logs").hidden = false;
   loadLogs();
 }
@@ -483,23 +578,24 @@ async function loadLogs() {
     const active = (tab.dataset.build === "1") === build;
     tab.className = "logs-tab rounded-md px-3 py-1 " + (active ? "bg-white shadow-sm dark:bg-stone-700" : "text-stone-500 dark:text-stone-400");
   }
-  $("logs-meta").textContent = "Загрузка…";
+  $("logs-meta").textContent = T.loading;
   $("logs-body").textContent = "";
   try {
     const res = await fetch("/api/logs?app=" + encodeURIComponent(app.relPath) + "&build=" + (build ? 1 : 0), { cache: "no-store" });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
     if (!data.deployment) {
-      $("logs-meta").textContent = "У сервиса ещё нет деплоев";
+      $("logs-meta").textContent = T.noDeploys;
       return;
     }
-    $("logs-meta").textContent = `Деплой ${data.deployment.id} · ${data.deployment.status} · строк: ${data.lines.length}`;
+    $("logs-meta").textContent = fmt(T.logsMeta,
+      { id: data.deployment.id, status: data.deployment.status, count: data.lines.length });
     $("logs-body").textContent = data.lines.length
-      ? data.lines.map((l) => new Date(l.time).toLocaleTimeString("ru-RU") + "  " + l.message).join("\n")
-      : "Лог пуст";
+      ? data.lines.map((l) => new Date(l.time).toLocaleTimeString(T.locale) + "  " + l.message).join("\n")
+      : T.logEmpty;
     $("logs-body").scrollTop = $("logs-body").scrollHeight;
   } catch (e) {
-    $("logs-meta").textContent = "Не удалось получить лог: " + e.message;
+    $("logs-meta").textContent = fmt(T.logsFailed, { error: e.message });
   }
 }
 
@@ -508,7 +604,7 @@ for (const tab of document.querySelectorAll(".logs-tab")) {
 }
 $("logs-refresh").addEventListener("click", loadLogs);
 $("logs-close").addEventListener("click", () => { $("logs").hidden = true; });
-$("logs").addEventListener("click", (e) => {  // клик по затемнённому фону вокруг окна
+$("logs").addEventListener("click", (e) => {
   if (e.target === $("logs") || e.target === $("logs-backdrop")) $("logs").hidden = true;
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("logs").hidden = true; });
@@ -528,19 +624,15 @@ async function refresh() {
     $("error").hidden = true;
     const n = data.apps.length;
     const linked = data.apps.filter((a) => a.status === "linked").length;
-    const time = new Date(data.scannedAt).toLocaleTimeString("ru-RU");
-    const live = {
-      on: "статусы деплоя из Railway",
-      off: "офлайн-режим: задайте RAILWAY_API_TOKEN для живых статусов",
-      error: "Railway не ответил, показаны локальные данные",
-    }[data.live] || "";
+    const time = new Date(data.scannedAt).toLocaleTimeString(T.locale);
+    const live = T.live[data.live] || "";
     const costs = [...new Map(data.apps.filter((a) => a.costUsd != null).map((a) => [a.projectId, a.costUsd])).values()];
-    const total = costs.length ? " · ≈ " + usd(costs.reduce((x, y) => x + y, 0)) + "/мес" : "";
+    const total = costs.length ? " · ≈ " + usd(costs.reduce((x, y) => x + y, 0)) + T.perMonth : "";
     $("summary").textContent = (n
-      ? `${n} ${plural(n, "приложение", "приложения", "приложений")} · ${linked} привязано к Railway${total} · обновлено в ${time}`
-      : `Обновлено в ${time}`) + (linked && live ? " · " + live : "");
+      ? fmt(T.summary, { count: n, apps: plural(n, T.apps), linked, total, time })
+      : fmt(T.summaryEmpty, { time })) + (linked && live ? " · " + live : "");
   } catch (e) {
-    $("error").textContent = "Не удалось получить список: " + e.message + ". Запущен ли small dashboard?";
+    $("error").textContent = fmt(T.listFailed, { error: e.message });
     $("error").hidden = false;
   } finally {
     button.disabled = false;

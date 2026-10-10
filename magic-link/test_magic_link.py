@@ -730,6 +730,22 @@ class TelegramTest(unittest.TestCase):
         call(app, path="/_access/request", method="POST", body=b"contact=x")
         self.assertEqual(self.inbox.wait(seconds=0.5), [])
 
+    def test_owner_language(self):
+        """Владелец читает лог и Telegram на своём языке (OWNER_LANG), посетитель — на языке браузера."""
+        for owner_lang, words in (("en", ("Access request to", "Grant access: small access add")),
+                                  ("ru", ("Запрос доступа к", "Выдать доступ: small access add"))):
+            with mock.patch.dict(os.environ, {"OWNER_LANG": owner_lang}):
+                app = MagicLink(secret_app, tokens="bob:" + TOKEN, request_url="")
+                call(app, path="/_access/request", method="POST", body=b"contact=x",
+                     headers={"HTTP_ACCEPT_LANGUAGE": "en-US"})
+                log = call(app, query="token=" + TOKEN)[3]
+            text = self.inbox.wait()[-1][1]["text"]
+            for word in words:
+                self.assertIn(word, text)
+            self.inbox.messages.clear()
+            login = "signed in by link (bob)" if owner_lang == "en" else "вход по ссылке (bob)"
+            self.assertIn("[magic-link] " + login, log)
+
     def test_telegram_down_does_not_break_the_request(self):
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
@@ -739,6 +755,15 @@ class TelegramTest(unittest.TestCase):
             status, _, body, _ = call(app, path="/_access/request", method="POST", body=b"contact=x")
         self.assertEqual(status, "200 OK")
         self.assertIn("Запрос отправлен", body)
+
+
+def setUpModule():
+    # Проверки выше читают русские строки лога; английские — в test_owner_language.
+    os.environ["OWNER_LANG"] = "ru"
+
+
+def tearDownModule():
+    os.environ.pop("OWNER_LANG", None)
 
 
 if __name__ == "__main__":

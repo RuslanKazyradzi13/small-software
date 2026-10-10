@@ -1,22 +1,22 @@
 'use strict';
-// Микро-приложение, созданное `small init`. Деплой: `small deploy`.
+// A small app created by `small init`. Deploy it with `small deploy`.
 //
-// Доступ по ссылке-приглашению https://<домен>/?token=<ACCESS_TOKEN>: токен лежит в small.json,
-// проверку делает magic-link.js. Свой код пишите в handler().
+// Who gets in is decided by magic-link.js: people you invite by work email (`small access add ivan@company.com`)
+// or with a personal invite link (`small access add bob`). Write your own code in handler().
 
 const http = require('node:http');
 const magicLink = require('./magic-link');
 
 const PAGE = `<!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>small app</title>
 </head>
 <body style="font-family: system-ui, sans-serif; text-align: center; padding: 48px 16px;">
-  <h1>🚀 Работает!</h1>
-  <p>Приложение создано командой <code>small init</code>. Измените <code>server.js</code> и выполните <code>small deploy</code>.</p>
+  <h1>🚀 It works!</h1>
+  <p>This app was created by <code>small init</code>. Edit <code>server.js</code> and run <code>small deploy</code>.</p>
 </body>
 </html>
 `;

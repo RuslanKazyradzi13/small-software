@@ -4,7 +4,8 @@
 
 <p align="center">
   <a href="https://github.com/RuslanKazyradzi13/small-software/actions/workflows/tests.yml"><img src="https://github.com/RuslanKazyradzi13/small-software/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
-  <img src="https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white" alt="Python 3.8+">
+  <a href="https://pypi.org/project/small-cli/"><img src="https://img.shields.io/pypi/v/small-cli?color=3DDC84&label=PyPI" alt="PyPI"></a>
+  <img src="https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/node-18%2B-339933?logo=nodedotjs&logoColor=white" alt="Node.js 18+">
   <img src="https://img.shields.io/badge/зависимости-0-3DDC84" alt="Без зависимостей">
   <a href="LICENSE"><img src="https://img.shields.io/badge/лицензия-MIT-FFB020" alt="Лицензия MIT"></a>
@@ -39,13 +40,12 @@
 > [!NOTE]
 > **Бета.** small работает от начала до конца и проверен на Windows, macOS и Linux, но проект молодой: шероховатости
 > возможны. Если что-то сломалось — [откройте issue](https://github.com/RuslanKazyradzi13/small-software/issues).
-> Страницы входа и письма — на русском и английском; **сообщения CLI пока только на русском**, английский — следующим.
+> CLI, страницы входа и письма — на русском и английском.
 
 ## Быстрый старт
 
 ```bash
-git clone https://github.com/RuslanKazyradzi13/small-software && cd small-software
-pip install ./small-cli                    # Windows: вместо этого добавьте small-cli/ в PATH (ниже)
+pip install small-cli                      # или: pipx install small-cli
 export RAILWAY_API_TOKEN=...               # Railway → Account Settings → Tokens
 
 small init team-budget                     # готовое приложение со входом для приглашённых
@@ -118,20 +118,20 @@ Starlette) и Node.js (Express, чистый `http`). `small init` кладёт 
 
 ## Установка
 
-- **macOS / Linux:** `pip install ./small-cli`
-- **Windows:** `pip install` создаёт `small.exe`, который Smart App Control может заблокировать. Добавьте папку
-  `small-cli` в `PATH` — команду `small` обслужит `small.cmd`.
+- **Везде:** `pip install small-cli` (или `pipx install small-cli`). Python 3.9+, без зависимостей.
+- **Windows:** если Smart App Control блокирует неподписанный `small.exe`, который создаёт pip, запускайте
+  `python -m small_cli` или склонируйте репозиторий и добавьте его папку `small-cli` в `PATH` — команду обслужит `small.cmd`.
+- **Язык:** русский или английский — по языку системы. Задать явно: `SMALL_LANG=ru` или `SMALL_LANG=en`.
 - В `RAILWAY_API_TOKEN` нужен **токен аккаунта или workspace** (токен проекта не умеет создавать проекты).
 
-Полный справочник команд: [small-cli/README.md](small-cli/README.md).
+Полный справочник команд: [small-cli/README.ru.md](small-cli/README.ru.md) · [in English](small-cli/README.md).
 
 ## Планы
 
 - [x] Деплой одной командой, сон, Postgres, свои домены, дашборд с оценкой расхода
 - [x] Вход по рабочей почте; личные ссылки; запросы доступа в Telegram
-- [x] Страницы входа и письма на русском и английском
-- [ ] Сообщения CLI и справочник на английском
-- [ ] `pip install small-cli` из PyPI
+- [x] Русский и английский: CLI, страницы входа, письма
+- [x] `pip install small-cli` из PyPI
 - [ ] Кнопка «Поделиться» в дашборде — без терминала
 - [ ] Вход по почте в шаблоне Streamlit
 - [ ] Облако без своего аккаунта Railway
@@ -141,9 +141,9 @@ Starlette) и Node.js (Express, чистый `http`). `small init` кладёт 
 ## Разработка
 
 ```bash
-cd small-cli   && python -m unittest discover -s tests     # 113 тестов (+ настоящие FastAPI/Streamlit, если установлены)
-cd magic-link  && python -m unittest test_magic_link       # 50 тестов
-cd magic-link  && node --test                              # 19 тестов
+cd small-cli   && python -m unittest discover -s tests     # 120 тестов (+ настоящие FastAPI/Streamlit, если установлены)
+cd magic-link  && python -m unittest test_magic_link       # 51 тест
+cd magic-link  && node --test                              # 20 тестов
 ```
 
 GitHub Actions гоняет всё на Windows, macOS и Linux. См. [CONTRIBUTING.md](CONTRIBUTING.md) и

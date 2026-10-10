@@ -1,9 +1,10 @@
-"""FastAPI-приложение, созданное `small init --template fastapi`. Деплой: `small deploy`.
+"""A FastAPI app created by `small init --template fastapi`. Deploy it with `small deploy`.
 
-Railway (Railpack) видит fastapi и uvicorn в requirements.txt и сам запускает `uvicorn main:app` на $PORT.
-Локально: `python main.py` (или `uvicorn main:app --reload`).
-Доступ по ссылке-приглашению https://<домен>/?token=<ACCESS_TOKEN>: токен лежит в small.json, проверку делает
-MagicLinkASGI из magic_link.py. Документация API (/docs) и websocket тоже закрыты.
+Railway (Railpack) finds fastapi and uvicorn in requirements.txt and runs `uvicorn main:app` on $PORT by itself.
+Locally: `python main.py` (or `uvicorn main:app --reload`).
+Who gets in is decided by MagicLinkASGI from magic_link.py: people you invite by work email
+(`small access add ivan@company.com`) or with a personal invite link (`small access add bob`).
+The API docs (/docs) and websockets are protected too.
 """
 
 import logging
@@ -21,8 +22,8 @@ app.add_middleware(MagicLinkASGI)
 
 
 class HideToken(logging.Filter):
-    """uvicorn пишет в access-лог полный адрес — прячем ?token=... и ?t=... (ссылка для входа), чтобы они не попали
-    в логи Railway."""
+    """uvicorn writes the full URL to its access log: hide ?token=... and ?t=... (sign-in link) so they never reach
+    the Railway logs."""
 
     def filter(self, record):
         if isinstance(record.args, tuple):
@@ -34,7 +35,7 @@ class HideToken(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(HideToken())
 
 PAGE = """<!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -42,9 +43,9 @@ PAGE = """<!doctype html>
 </head>
 <body style="font-family: system-ui, sans-serif; text-align: center; padding: 48px 16px;">
   <h1>🚀 small + FastAPI</h1>
-  <p>Приложение создано командой <code>small init --template fastapi</code>.
-     Измените <code>main.py</code> и выполните <code>small deploy</code>.</p>
-  <p><a href="/docs">Документация API</a> · <a href="/api/hello?name=small">/api/hello</a></p>
+  <p>This app was created by <code>small init --template fastapi</code>.
+     Edit <code>main.py</code> and run <code>small deploy</code>.</p>
+  <p><a href="/docs">API docs</a> · <a href="/api/hello?name=small">/api/hello</a></p>
 </body>
 </html>
 """
@@ -56,8 +57,8 @@ def index():
 
 
 @app.get("/api/hello")
-def hello(name: str = "мир"):
-    return {"message": "Привет, %s!" % name, "time": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+def hello(name: str = "world"):
+    return {"message": "Hello, %s!" % name, "time": datetime.now(timezone.utc).isoformat(timespec="seconds")}
 
 
 if __name__ == "__main__":

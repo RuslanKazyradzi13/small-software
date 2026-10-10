@@ -2,24 +2,31 @@
 
 from pathlib import Path
 
+from .i18n import tr
+
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 DEFAULT_TEMPLATE = "python-http"
 
+# description — (английский, русский): язык выбирается при вызове, см. description().
 TEMPLATES = {
     "python-http": {
-        "description": "Python 3, стандартная библиотека (wsgiref) + magic_link.py",
+        "description": ("Python 3, standard library (wsgiref) + magic_link.py",
+                        "Python 3, стандартная библиотека (wsgiref) + magic_link.py"),
         "gitignore": ["__pycache__/", "*.pyc", ".venv/", "venv/"],
     },
     "node-http": {
-        "description": "Node.js 18+, модуль http + magic-link.js",
+        "description": ("Node.js 18+, http module + magic-link.js",
+                        "Node.js 18+, модуль http + magic-link.js"),
         "gitignore": ["node_modules/", "npm-debug.log*"],
     },
     "fastapi": {
-        "description": "FastAPI + uvicorn (ASGI), защита MagicLinkASGI из magic_link.py",
+        "description": ("FastAPI + uvicorn (ASGI), protected by MagicLinkASGI from magic_link.py",
+                        "FastAPI + uvicorn (ASGI), защита MagicLinkASGI из magic_link.py"),
         "gitignore": ["__pycache__/", "*.pyc", ".venv/", "venv/"],
     },
     "streamlit": {
-        "description": "Streamlit: интерактивный интерфейс на Python, вход по ссылке встроен в app.py",
+        "description": ("Streamlit: interactive Python UI, invite-link sign-in built into app.py",
+                        "Streamlit: интерактивный интерфейс на Python, вход по ссылке встроен в app.py"),
         "gitignore": ["__pycache__/", "*.pyc", ".venv/", "venv/", ".streamlit/secrets.toml"],
     },
 }
@@ -29,10 +36,16 @@ GITIGNORE_COMMON = ["small.json", ".small.json", ".env"]
 # Нужно в git, но не нужно в Railway.
 RAILWAYIGNORE = ["*.md", "tests/", ".vscode/", ".idea/"]
 
-IGNORE_HEADERS = {
-    ".gitignore": "# Не коммитить",
-    ".railwayignore": "# Не загружать в Railway (в дополнение к .gitignore)",
+IGNORE_HEADERS = {  # (английский, русский)
+    ".gitignore": ("# Do not commit", "# Не коммитить"),
+    ".railwayignore": ("# Do not upload to Railway (in addition to .gitignore)",
+                       "# Не загружать в Railway (в дополнение к .gitignore)"),
 }
+
+
+def description(template):
+    """Описание шаблона на языке пользователя (для `small init --help`)."""
+    return tr(*TEMPLATES[template]["description"])
 
 
 def template_files(template):
@@ -61,6 +74,8 @@ def merge_ignore(path, lines):
         return "unchanged"
     if text and not text.endswith("\n"):
         text += "\n"
-    text += ("\n# Добавлено small init\n" if exists else IGNORE_HEADERS[path.name] + "\n") + "\n".join(missing) + "\n"
+    header = tr("\n# Added by small init\n", "\n# Добавлено small init\n") if exists \
+        else tr(*IGNORE_HEADERS[path.name]) + "\n"
+    text += header + "\n".join(missing) + "\n"
     path.write_bytes(text.encode("utf-8"))
     return "updated" if exists else "created"
