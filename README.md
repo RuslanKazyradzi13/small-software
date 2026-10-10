@@ -45,7 +45,7 @@ of users, not for an app that five colleagues open twice a week.
 ## Quick start
 
 ```bash
-pip install small-software                      # or: pipx install small-software
+pip install small-software                 # or: pipx install small-software
 export RAILWAY_API_TOKEN=...               # Railway → Account Settings → Tokens
 
 small init team-budget                     # a ready app with invite-only login
@@ -58,6 +58,17 @@ small deploy                               # → https://team-budget.up.railway.
 <p align="center">
   <img src="docs/assets/terminal-demo.gif" alt="small init, small access add, small deploy in a terminal" width="720">
 </p>
+
+### Or just ask your AI agent
+
+```bash
+claude mcp add small -- small mcp          # Claude Code; Cursor and other MCP clients: see the CLI reference
+```
+
+> *“Deploy this folder and share it with ivan@company.com.”*
+
+The agent creates the app, deploys it and grants access itself through `small mcp`. Sharing by email keeps
+secrets out of the chat; deleting apps stays a terminal-only command.
 
 ## Share it like a Google Doc
 
@@ -85,6 +96,8 @@ answer — and the owner receives an access request (in the logs and, optionally
 | **Database** | `small db add postgres` → `DATABASE_URL` in the app; removed together with the app |
 | **Sleep** | `small sleep on` — idle apps sleep and cost almost nothing; they wake in ~1.7 s |
 | **Dashboard** | `small dashboard` — every app, deploy status, estimated monthly cost, logs, “open as owner” |
+| **Share without a terminal** | the **Share** button in the dashboard adds or revokes emails, domains and links |
+| **AI agents (MCP)** | `small mcp` — Claude Code, Cursor and other agents create, deploy and share apps |
 | **Custom domain** | `small domain add reports.company.com` — prints the DNS records to add |
 | **Templates** | `python-http` (stdlib only), `fastapi`, `node-http`, `streamlit` |
 | **Zero dependencies** | the CLI is pure Python standard library; the middleware is a single file for Python and Node.js |
@@ -139,8 +152,9 @@ small destroy                                    # remove the app and its databa
 ## Install
 
 - **Everywhere:** `pip install small-software` (or `pipx install small-software`). Python 3.9+, no dependencies.
-- **Windows:** if Smart App Control blocks the unsigned `small.exe` that pip creates, run `python -m small_cli`
-  instead, or clone the repo and add its `small-cli` folder to `PATH` — `small.cmd` then serves the command.
+- **Windows (recommended):** in PowerShell run `irm https://raw.githubusercontent.com/RuslanKazyradzi13/small-software/main/install.ps1 | iex`. It installs small into its own
+  Python environment and adds a `small` command that Smart App Control does not block (no unsigned `small.exe`).
+  Python 3.9+, no admin rights; run it again to upgrade.
 - **Language:** English or Russian, picked from your system language. Force one with `SMALL_LANG=en` or `SMALL_LANG=ru`.
 - A Railway **account or workspace token** goes to `RAILWAY_API_TOKEN` (a project token cannot create projects).
 
@@ -152,10 +166,10 @@ Full CLI reference: [small-cli/README.md](small-cli/README.md) · [по-русс
 - [x] Sign-in by work email; personal invite links; access requests to Telegram
 - [x] English and Russian: CLI, sign-in pages, emails
 - [x] `pip install small-software` from PyPI
-- [ ] “Share” button in the dashboard — no terminal needed
-- [ ] Email sign-in for the Streamlit template
+- [x] “Share” button in the dashboard — no terminal needed
+- [x] Email sign-in for the Streamlit template
 - [ ] Hosted mode — no Railway account needed
-- [ ] Deploy and share straight from AI coding agents (MCP)
+- [x] Deploy and share straight from AI coding agents (MCP)
 - [ ] Company workspace: app catalog, owners, audit log
 
 ## Development

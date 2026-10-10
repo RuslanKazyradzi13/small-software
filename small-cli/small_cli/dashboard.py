@@ -4,12 +4,18 @@
 файлов. Если задан RAILWAY_API_TOKEN, для привязанных приложений дополнительно спрашиваем у Railway статус
 последнего деплоя; любая ошибка (сеть, таймаут, токен) просто оставляет локальные данные.
 Значения переменных из small.json и сам токен Railway никогда не отдаются в браузер.
+
+Кнопка «Поделиться» (/api/access) — единственное, что меняет данные: выдаёт и отзывает доступ той же логикой,
+что small access. Такие запросы принимаются только со страницы этого дашборда (см. DashboardHandler._trusted).
 """
 
+import hmac
 import json
 import os
 import re
+import secrets
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import access
 from .archive import ALWAYS_IGNORED
+from .common import CliError
 from .config import CONFIG_FILE, STATE_FILE, ConfigError, load_config, load_state
 from .i18n import lang, tr
 from .railway import Railway, RailwayError
@@ -31,6 +38,9 @@ LIVE_TIMEOUT = 5      # секунд на запрос к Railway: кнопка 
 LIVE_WORKERS = 8
 LOG_LINES = 200
 LOAD_DAYS = 7
+SECRET_HEADER = "X-Small-Dashboard"  # ключ этого запуска сервера в запросах страницы к /api/access
+MAX_BODY = 4096       # байт в теле POST /api/access: там всего три коротких поля
+MAX_WHO = 320         # символов в адресе почты, домене или имени
 # Тарифы Railway за месяц (docs.railway.com/reference/pricing/plans) на единицу средней нагрузки из metrics.
 MONTHLY_PRICES_USD = {
     "CPU_USAGE": 20.0,         # $20 за vCPU, загруженный весь месяц
@@ -174,6 +184,12 @@ class DashboardServer(ThreadingHTTPServer):
         port = self.server_address[1]
         # Защита от DNS rebinding: чужой сайт, указавший свой домен на 127.0.0.1, получит 403.
         self.allowed_hosts = {"127.0.0.1:%d" % port, "localhost:%d" % port}
+        self.allowed_origins = {"http://" + host for host in self.allowed_hosts}
+        # Ключ этого запуска: страница шлёт его заголовком SECRET_HEADER в каждом запросе к /api/access. Чужой
+        # сайт его не знает, а запрос со своим заголовком браузер отправит только после CORS-preflight (OPTIONS),
+        # который сервер не одобряет.
+        self.secret = secrets.token_urlsafe(32)
+        self.access_lock = threading.Lock()  # small.json и переменные в Railway меняет один запрос за раз
 
     @property
     def url(self):
@@ -192,6 +208,7 @@ def start_server(root, port=DEFAULT_PORT, token=None):
 
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "small-dashboard"
+    timeout = 30  # секунд тишины от браузера: молчащее соединение не держит поток вечно
 
     def do_GET(self):
         if self.headers.get("Host") not in self.server.allowed_hosts:
@@ -199,11 +216,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         path, params = url.path, {k: v[-1] for k, v in parse_qs(url.query).items()}
         if path == "/":
-            return self._send(200, "text/html; charset=utf-8", render_page().encode("utf-8"))
+            # Страницу с ключом нельзя встроить в чужой сайт: там под видимую кнопку подложили бы «Отозвать».
+            return self._send(200, "text/html; charset=utf-8", render_page(self.server.secret).encode("utf-8"),
+                              {"X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'"})
         if path == "/open":
             return self._open(params.get("app"))
         if path == "/api/logs":
             return self._logs(params.get("app"), params.get("build") == "1")
+        if path == "/api/access":
+            return self._access_list(params.get("app"))
         if path == "/api/apps":
             apps = scan_apps(self.server.root)
             live = add_live_status(apps, self.server.token)
@@ -215,6 +236,129 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._send(200, "application/json; charset=utf-8",
                               json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         self._send(404, "text/plain; charset=utf-8", b"Not found")
+
+    def do_POST(self):
+        """POST /api/access {"app": relPath, "action": "add" | "revoke", "who": почта, @домен или имя}."""
+        length = self._content_length()
+        # Тело (не больше MAX_BODY) читаем до проверок: закрытый с непрочитанными данными сокет Windows обрывает
+        # RST-пакетом, и браузер не увидел бы даже ответа 403.
+        body = self.rfile.read(length) if length is not None and length <= MAX_BODY else None
+        if not self._trusted():
+            return self._forbidden()
+        if urlparse(self.path).path != "/api/access":
+            return self._send(404, "text/plain; charset=utf-8", b"Not found")
+        if self.headers.get("Content-Type", "").split(";")[0].strip().lower() != "application/json":
+            return self._json(415, {"error": tr("expected Content-Type: application/json",
+                                                "нужен Content-Type: application/json")})
+        if length is None:
+            return self._json(411, {"error": tr("Content-Length is required", "нужен Content-Length")})
+        if body is None:
+            return self._json(413, {"error": tr("request is too large", "слишком большой запрос")})
+        try:
+            request = json.loads(body.decode("utf-8"))
+        except ValueError:  # и UnicodeDecodeError
+            request = None
+        if not isinstance(request, dict) or request.get("action") not in ("add", "revoke") \
+                or not isinstance(request.get("app"), str) or not isinstance(request.get("who"), str):
+            return self._json(400, {"error": tr('expected JSON {"app": ..., "action": "add" or "revoke", "who": ...}',
+                                                'ожидается JSON {"app": ..., "action": "add" или "revoke", '
+                                                '"who": ...}')})
+        self._access_change(request["app"], request["action"], request["who"].strip())
+
+    def _content_length(self):
+        """Длина тела из Content-Length; None — заголовка нет, он неверный или тело идёт кусками (chunked)."""
+        if self.headers.get("Transfer-Encoding"):
+            return None
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return None
+        return length if length >= 0 else None
+
+    def _trusted(self):
+        """Запрос — со страницы этого дашборда: Host наш (DNS rebinding), Origin наш, если браузер его прислал
+        (чужой сайт), браузер не пометил запрос как межсайтовый, и в SECRET_HEADER — ключ этого запуска."""
+        server = self.server
+        if self.headers.get("Host") not in server.allowed_hosts:
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in server.allowed_origins:
+            return False
+        if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin"):
+            return False
+        given = self.headers.get(SECRET_HEADER, "").encode("utf-8", "replace")
+        return hmac.compare_digest(given, server.secret.encode("ascii"))
+
+    def _forbidden(self):
+        # Свою страницу сервер видит с отказом, только если его перезапустили: ключ у неё прежний.
+        self._json(403, {"error": tr("forbidden: reload the page (the dashboard may have been restarted)",
+                                     "запрещено: обновите страницу (дашборд мог быть перезапущен)")})
+
+    def _access_app(self, rel_path):
+        """(приложение, None) или (None, (код, ответ)). Только приложение из списка (произвольные пути с диска
+        не принимаются) и привязанное к Railway; нужен токен — иначе small.json и Railway разойдутся."""
+        app = self._find(rel_path)
+        if not app or not app["serviceId"]:
+            return None, (404, {"error": _not_deployed()})
+        if not self.server.token:
+            return None, (400, {"error": _need_token()})
+        return app, None
+
+    def _access_list(self, rel_path):
+        """GET /api/access?app=relPath: у кого есть доступ — адреса, домены и имена личных ссылок, без токенов."""
+        from .commands.access import list_access  # не в начале модуля: commands импортирует этот модуль
+
+        if not self._trusted():
+            return self._forbidden()
+        app, error = self._access_app(rel_path)
+        if error:
+            return self._json(*error)
+        warnings = []
+        try:
+            info = list_access(Path(app["path"]), warn=warnings.append)
+        except ConfigError as e:
+            return self._json(400, {"error": str(e)})
+        names = []
+        for name, _ in info["entries"]:
+            if name not in names:
+                names.append(name)  # повторы имени и общие ссылки без имени отзываются вместе — одной строкой
+        self._json(200, {
+            "app": app["relPath"], "url": _app_url(app),
+            "emails": [{"who": email, "domain": email.startswith("@")} for email in info["emails"]],
+            "links": [{"who": name, "shared": not name} for name in names],
+            "mailConfigured": info["mail"], "warnings": warnings,
+        })
+
+    def _access_change(self, rel_path, action, who):
+        """Выдаёт или отзывает доступ, как small access add / revoke: small.json, Railway, перезапуск.
+        Личная ссылка уходит в браузер только здесь — в ответе на add, который её создал."""
+        from .commands.access import grant_access, revoke_access, who_error
+
+        if not _valid_who(who, action):
+            return self._json(400, {"error": str(who_error())})
+        app, error = self._access_app(rel_path)
+        if error:
+            return self._json(*error)
+        folder, warnings = Path(app["path"]), []
+        try:
+            with self.server.access_lock:
+                change = grant_access if action == "add" else revoke_access
+                result = change(folder, who, deploy=True, warn=warnings.append)
+        except (CliError, ConfigError) as e:
+            return self._json(400, {"error": str(e)})
+        except RailwayError as e:
+            return self._json(502, {"error": "Railway: %s" % e})
+        except OSError as e:  # small.json не записался: нет прав, файл занят другой программой
+            return self._json(500, {"error": str(e)})
+        payload = {"ok": True, "action": action, "kind": result["kind"], "who": result["who"],
+                   "url": _app_url(app), "warnings": warnings}
+        if action == "add" and result["kind"] == "link":
+            # Домен — проверенный из describe_app, а не как есть из .small.json.
+            payload["link"] = (access.invite_link(urlparse(app["url"]).netloc, result["token"])
+                               if app["url"] else None)
+        elif action == "add":
+            payload["mailConfigured"] = result["mail"]
+        self._json(200, payload)
 
     def _find(self, rel_path):
         """Приложение из списка по relPath — произвольные пути с диска не принимаются."""
@@ -241,10 +385,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _logs(self, rel_path, build):
         app = self._find(rel_path)
         if not app or not app["serviceId"]:
-            return self._json(404, {"error": tr("app not found or not deployed", "приложение не найдено или не задеплоено")})
+            return self._json(404, {"error": _not_deployed()})
         if not self.server.token:
-            return self._json(400, {"error": tr("RAILWAY_API_TOKEN is required: restart small dashboard with it set",
-                                                "нужен RAILWAY_API_TOKEN: перезапустите small dashboard с ним")})
+            return self._json(400, {"error": _need_token()})
         try:
             api = Railway(self.server.token)
             deployment = api.latest_deployment(app["serviceId"], app["environmentId"], timeout=LIVE_TIMEOUT)
@@ -261,16 +404,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _json(self, code, payload):
         self._send(code, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
-    def _send(self, code, content_type, body):
+    def _send(self, code, content_type, body, headers=None):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
     def log_message(self, format, *args):
         pass
+
+
+def _not_deployed():
+    return tr("app not found or not deployed", "приложение не найдено или не задеплоено")
+
+
+def _need_token():
+    return tr("RAILWAY_API_TOKEN is required: restart small dashboard with it set",
+              "нужен RAILWAY_API_TOKEN: перезапустите small dashboard с ним")
+
+
+def _app_url(app):
+    return app["url"] + "/" if app["url"] else None
+
+
+def _valid_who(who, action):
+    """Почта, @домен или имя личной ссылки — по тем же правилам, что у small access; "" — общая ссылка без имени
+    (её можно только отозвать)."""
+    if action == "revoke" and who == "":
+        return True
+    return len(who) <= MAX_WHO and (access.is_email(who.lower()) or bool(access.NAME_RE.match(who)))
 
 
 def _page_texts():
@@ -333,11 +499,57 @@ def _page_texts():
         "summaryEmpty": tr("Updated at {time}", "Обновлено в {time}"),
         "listFailed": tr("Couldn't load the app list: {error}. Is small dashboard running?",
                          "Не удалось получить список: {error}. Запущен ли small dashboard?"),
+        # Окно «Поделиться»
+        "share": tr("Share", "Поделиться"),
+        "shareHint": tr("Give access by work email or with a personal link",
+                        "Выдать доступ по рабочей почте или по личной ссылке"),
+        "shareTitle": tr("Share · {app}", "Поделиться · {app}"),
+        "accessFailed": tr("Couldn't load the access list: {error}", "Не удалось получить список доступа: {error}"),
+        "nobody": tr("Nobody has access yet: the app is closed to everyone.",
+                     "Доступа пока нет ни у кого — приложение закрыто для всех."),
+        "kindEmail": tr("signs in with this email", "входит по этой почте"),
+        "kindDomain": tr("everyone with an address in this domain", "все, у кого адрес в этом домене"),
+        "kindLink": tr("personal link", "личная ссылка"),
+        "sharedLink": tr("Shared link", "Общая ссылка"),
+        "kindShared": tr("anyone who has it can open the app", "открыть приложение может любой, у кого она есть"),
+        "revoke": tr("Revoke", "Отозвать"),
+        "revokeLabel": tr("Revoke access for {who}", "Отозвать доступ у {who}"),
+        "revokeShared": tr("Revoke the shared link", "Отозвать общую ссылку"),
+        "confirmRevoke": tr("Revoke access for {who}? It stops working once the app restarts.",
+                            "Отозвать доступ у {who}? Он закроется после перезапуска приложения."),
+        "confirmRevokeShared": tr("Revoke the shared link? Everyone who has it loses access once the app restarts.",
+                                  "Отозвать общую ссылку? Все, у кого она есть, потеряют доступ после перезапуска "
+                                  "приложения."),
+        "confirmClosed": tr("Nobody else has access: the app will be closed to everyone.",
+                            "Больше доступа ни у кого нет — приложение закроется для всех."),
+        "adding": tr("Adding…", "Добавляю…"),
+        "revoking": tr("Revoking…", "Отзываю…"),
+        "granted": tr("Access granted: {who}", "Доступ выдан: {who}"),
+        "domainWho": tr("all {domain} addresses", "все адреса {domain}"),
+        "linkFor": tr("Personal link for {who}", "Личная ссылка для {who}"),
+        "linkPassword": tr("The link works like a password: send it to this person only. "
+                           "It is shown only once, so copy it now.",
+                           "Ссылка работает как пароль — пересылайте её только этому человеку. "
+                           "Она показывается один раз: скопируйте её сейчас."),
+        "linkLater": tr("The link will appear after small deploy: small link --as {who}",
+                        "Ссылка появится после small deploy: small link --as {who}"),
+        "copy": tr("Copy", "Копировать"),
+        "copied": tr("Copied", "Скопировано"),
+        "emailHow": tr("How to sign in: open {url} and enter the work email. An email with a sign-in link will arrive.",
+                       "Как войти: открыть {url} и ввести рабочую почту — придёт письмо со ссылкой для входа."),
+        "noUrl": tr("the app URL (after small deploy)", "адрес приложения (после small deploy)"),
+        "mailOff": tr("Email is not set up, so sign-in emails are not sent. Set it up in the terminal: "
+                      "small mail resend",
+                      "Почта не настроена, письма для входа не уходят. Подключить в терминале: small mail resend"),
+        "revoked": tr("Access revoked: {who}", "Доступ отозван: {who}"),
+        "restarting": tr("Railway is restarting the app: the change takes effect in a minute or two.",
+                         "Railway перезапускает приложение — изменение вступит в силу через минуту-другую."),
     }
 
 
-def render_page():
-    """HTML дашборда на текущем языке: тексты разметки подставляются в {{name}}, тексты для JS — объектом T."""
+def render_page(secret=""):
+    """HTML дашборда на текущем языке: тексты разметки подставляются в {{name}}, тексты для JS — объектом T.
+    secret — ключ запуска сервера для запросов к /api/access."""
     code = '<code class="font-mono">%s</code>'
     values = {
         "lang": lang(),
@@ -350,8 +562,15 @@ def render_page():
         "tab_app": tr("App", "Приложение"),
         "tab_build": tr("Build", "Сборка"),
         "close": tr("Close", "Закрыть"),
+        "share_label": tr("Email, @domain or name", "Почта, @домен или имя"),
+        "share_add": tr("Add", "Добавить"),
+        "share_hint": tr("ivan@company.com: signs in with this email; @company.com: the whole domain; "
+                         "bob: a personal link.",
+                         "ivan@company.com — вход по этой почте, @company.com — весь домен, bob — личная ссылка."),
+        "share_who_has": tr("Who has access", "У кого есть доступ"),
         # JSON внутри <script>: "</" экранируем, чтобы "</script>" в строке не закрыл тег раньше времени.
         "texts": json.dumps(_page_texts(), ensure_ascii=False).replace("</", "<\\/"),
+        "secret": json.dumps(secret),  # token_urlsafe: только латиница, цифры, - и _
     }
     return re.sub(r"\{\{(\w+)\}\}", lambda m: values[m.group(1)], PAGE_TEMPLATE)
 
@@ -362,6 +581,12 @@ def render_page():
 # - ARROW вставляется через insertAdjacentHTML: это константа, не данные пользователя.
 # - Клик по #logs или #logs-backdrop — клик по затемнённому фону вокруг окна: окно закрывается.
 # - fmt() подставляет {name} за один проход: подставленные значения (сообщения об ошибках) повторно не разбираются.
+# - SECRET — ключ этого запуска сервера: api() шлёт его заголовком X-Small-Dashboard. После перезапуска small dashboard
+#   ключ другой, сервер отвечает 403 «обновите страницу».
+# - #share, как и #logs, без display-класса. Окно «Поделиться» закрывают только × и Escape, не клик мимо: случайный
+#   клик не должен терять личную ссылку, которая показывается один раз. При закрытии она стирается со страницы.
+# - В списке доступа (/api/access) токенов нет; ссылка приходит только в ответе на add, который её создал.
+# - Ответ, пришедший после закрытия окна или открытия его для другого приложения, не показывается (shareState.app).
 PAGE_TEMPLATE = r"""<!doctype html>
 <html lang="{{lang}}">
 <head>
@@ -420,8 +645,39 @@ PAGE_TEMPLATE = r"""<!doctype html>
  </div>
 </div>
 
+<div id="share" hidden class="fixed inset-0 z-10 bg-black/50">
+ <div class="flex h-full items-center justify-center p-4">
+  <div role="dialog" aria-modal="true" aria-labelledby="share-title"
+    class="flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-xl bg-white shadow-xl dark:bg-stone-900">
+    <div class="flex items-center gap-2 border-b border-stone-200 px-4 py-3 dark:border-stone-800">
+      <h2 id="share-title" class="mr-auto min-w-0 truncate font-semibold"></h2>
+      <button id="share-close" type="button" aria-label="{{close}}" class="rounded-lg px-2 py-1 text-lg leading-none hover:bg-stone-100 dark:hover:bg-stone-800">×</button>
+    </div>
+    <div class="overflow-auto px-4 py-4">
+      <form id="share-form">
+        <label for="share-who" class="text-sm font-medium">{{share_label}}</label>
+        <div class="mt-1.5 flex gap-2">
+          <input id="share-who" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="320"
+            placeholder="ivan@company.com" aria-describedby="share-hint"
+            class="min-w-0 flex-1 rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-stone-500 focus:ring-2 focus:ring-stone-300 disabled:opacity-60 dark:border-stone-700 dark:bg-stone-950 dark:focus:ring-stone-700">
+          <button id="share-add" type="submit" class="inline-flex items-center rounded-lg bg-stone-900 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-stone-700 disabled:cursor-wait disabled:opacity-60 dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-white">{{share_add}}</button>
+        </div>
+        <p id="share-hint" class="mt-1.5 text-xs text-stone-500 dark:text-stone-400">{{share_hint}}</p>
+      </form>
+      <div id="share-error" hidden role="alert" class="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"></div>
+      <div id="share-result" hidden role="status" class="mt-3 rounded-lg border border-stone-200 bg-stone-50 px-3 py-3 text-sm dark:border-stone-800 dark:bg-stone-950"></div>
+      <h3 class="mt-5 text-sm font-semibold">{{share_who_has}}</h3>
+      <p id="share-status" class="mt-1 text-xs text-stone-500 dark:text-stone-400"></p>
+      <ul id="share-list" class="mt-1 divide-y divide-stone-200 dark:divide-stone-800"></ul>
+      <div id="share-notes"></div>
+    </div>
+  </div>
+ </div>
+</div>
+
 <script>
 const T = {{texts}};
+const SECRET = {{secret}};
 const $ = (id) => document.getElementById(id);
 
 function el(tag, className, text) {
@@ -513,6 +769,17 @@ function card(app) {
 
   if (app.url || app.serviceId) {
     const actions = el("div", "mt-3 flex flex-wrap gap-2");
+    if (app.serviceId) {
+      const share = el("button", PRIMARY, T.share);
+      share.type = "button";
+      share.title = T.shareHint;
+      if (liveMode === "off") {
+        share.disabled = true;
+        share.title = T.needToken;
+      }
+      share.addEventListener("click", () => openShare(app, share));
+      actions.append(share);
+    }
     if (app.url) {
       const open = el("a", BUTTON, T.open);
       open.href = "/open?app=" + encodeURIComponent(app.relPath);
@@ -561,6 +828,12 @@ function usd(value) {
 
 const BUTTON = "inline-flex items-center rounded-lg border border-stone-300 px-3 py-1.5 text-sm font-medium transition " +
   "hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-stone-700 dark:hover:bg-stone-800";
+const PRIMARY = "inline-flex items-center rounded-lg border border-stone-900 bg-stone-900 px-3 py-1.5 text-sm font-medium " +
+  "text-white transition hover:bg-stone-700 disabled:cursor-not-allowed disabled:opacity-50 " +
+  "dark:border-stone-100 dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-white";
+const REVOKE = "shrink-0 rounded-lg px-2.5 py-1 text-sm font-medium text-red-700 transition hover:bg-red-50 " +
+  "disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-400 dark:hover:bg-red-950";
+const NOTE = "mt-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-300";
 let liveMode = "off";
 const logsState = { app: null, build: false };
 
@@ -607,7 +880,192 @@ $("logs-close").addEventListener("click", () => { $("logs").hidden = true; });
 $("logs").addEventListener("click", (e) => {
   if (e.target === $("logs") || e.target === $("logs-backdrop")) $("logs").hidden = true;
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("logs").hidden = true; });
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  $("logs").hidden = true;
+  closeShare();
+});
+
+async function api(path, payload) {
+  const options = { cache: "no-store", headers: { "X-Small-Dashboard": SECRET } };
+  if (payload !== undefined) {
+    options.method = "POST";
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(payload);
+  }
+  const res = await fetch(path, options);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+  return data;
+}
+
+function fmtNodes(template, values) {
+  return template.split(/(\{\w+\})/).filter(Boolean).map((part) => {
+    const key = part.slice(1, -1);
+    if (!/^\{\w+\}$/.test(part) || !(key in values)) return document.createTextNode(part);
+    const value = values[key];
+    return value instanceof Node ? value : document.createTextNode(String(value));
+  });
+}
+
+const shareState = { app: null, opener: null, busy: false, mailNoted: false };
+
+function openShare(app, opener) {
+  shareState.app = app;
+  shareState.opener = opener;
+  shareState.mailNoted = false;
+  $("share-title").textContent = fmt(T.shareTitle, { app: app.name });
+  $("share-who").value = "";
+  showShareError(null);
+  $("share-result").replaceChildren();
+  $("share-result").hidden = true;
+  $("share").hidden = false;
+  $("share-who").focus();
+  loadAccess();
+}
+
+function closeShare() {
+  if ($("share").hidden) return;
+  $("share").hidden = true;
+  $("share-result").replaceChildren();
+  $("share-result").hidden = true;
+  shareState.app = null;
+  if (shareState.opener) shareState.opener.focus();
+}
+
+function showShareError(message) {
+  $("share-error").textContent = message ? message.charAt(0).toUpperCase() + message.slice(1) : "";
+  $("share-error").hidden = !message;
+}
+
+function setShareBusy(busy) {
+  shareState.busy = busy;
+  $("share-add").disabled = busy;
+  for (const button of $("share-list").querySelectorAll("button")) button.disabled = busy;
+}
+
+async function loadAccess() {
+  const app = shareState.app;
+  $("share-status").textContent = T.loading;
+  $("share-list").replaceChildren();
+  $("share-notes").replaceChildren();
+  try {
+    const data = await api("/api/access?app=" + encodeURIComponent(app.relPath));
+    if (shareState.app === app) renderAccess(data);
+  } catch (e) {
+    if (shareState.app === app) $("share-status").textContent = fmt(T.accessFailed, { error: e.message });
+  }
+}
+
+function renderAccess(data) {
+  const rows = [
+    ...data.emails.map((e) => ({ who: e.who, label: e.who, kind: e.domain ? T.kindDomain : T.kindEmail })),
+    ...data.links.map((l) => l.shared
+      ? { who: "", label: T.sharedLink, kind: T.kindShared, shared: true }
+      : { who: l.who, label: l.who, kind: T.kindLink }),
+  ];
+  $("share-status").textContent = rows.length ? "" : T.nobody;
+  $("share-list").replaceChildren(...rows.map((row) => accessRow(row, rows.length)));
+  const notes = [...data.warnings];
+  if (data.emails.length && !data.mailConfigured && !shareState.mailNoted) notes.push(T.mailOff);
+  $("share-notes").replaceChildren(...notes.map((text) => el("p", NOTE, "⚠ " + text)));
+  setShareBusy(shareState.busy);
+}
+
+function accessRow(row, total) {
+  const li = el("li", "flex items-center gap-3 py-2");
+  const text = el("div", "min-w-0 flex-1");
+  text.append(el("p", "truncate text-sm font-medium" + (row.shared ? " italic" : ""), row.label),
+    el("p", "text-xs text-stone-500 dark:text-stone-400", row.kind));
+  const revoke = el("button", REVOKE, T.revoke);
+  revoke.type = "button";
+  revoke.setAttribute("aria-label", row.shared ? T.revokeShared : fmt(T.revokeLabel, { who: row.label }));
+  revoke.addEventListener("click", () => {
+    let question = row.shared ? T.confirmRevokeShared : fmt(T.confirmRevoke, { who: row.label });
+    if (total === 1) question += " " + T.confirmClosed;
+    if (confirm(question)) changeAccess({ action: "revoke", who: row.who }, revoke, T.revoking);
+  });
+  li.append(text, revoke);
+  return li;
+}
+
+async function changeAccess(request, button, busyText) {
+  const app = shareState.app;
+  if (!app || shareState.busy) return;
+  const label = button.textContent;
+  button.textContent = busyText;
+  setShareBusy(true);
+  showShareError(null);
+  try {
+    const result = await api("/api/access", { app: app.relPath, ...request });
+    if (shareState.app !== app) return;
+    showResult(result);
+    if (request.action === "add") $("share-who").value = "";
+    loadAccess();
+  } catch (e) {
+    if (shareState.app === app) showShareError(e.message);
+  } finally {
+    button.textContent = label;
+    setShareBusy(false);
+    if (shareState.app === app) ($("share-copy") || $("share-who")).focus();
+  }
+}
+
+function showResult(result) {
+  const parts = [];
+  shareState.mailNoted = result.action === "add" && result.kind !== "link" && !result.mailConfigured;
+  const done = (text) => el("p", "font-medium text-emerald-700 dark:text-emerald-400", "✓ " + text);
+  if (result.action === "revoke") {
+    parts.push(done(fmt(T.revoked, { who: result.kind === "link" && !result.who ? T.sharedLink : result.who })));
+  } else if (result.kind === "link") {
+    parts.push(done(fmt(T.granted, { who: result.who })));
+    if (result.link) {
+      const row = el("div", "mt-2 flex gap-2");
+      const input = el("input", "min-w-0 flex-1 rounded-lg border border-stone-300 bg-white px-3 py-1.5 font-mono text-xs " +
+        "dark:border-stone-700 dark:bg-stone-900");
+      input.readOnly = true;
+      input.value = result.link;
+      input.setAttribute("aria-label", fmt(T.linkFor, { who: result.who }));
+      input.addEventListener("focus", () => input.select());
+      const copy = el("button", BUTTON, T.copy);
+      copy.id = "share-copy";
+      copy.type = "button";
+      copy.addEventListener("click", () => copyLink(input, copy));
+      row.append(input, copy);
+      parts.push(row, el("p", NOTE, "⚠ " + T.linkPassword));
+    } else {
+      parts.push(el("p", "mt-1", fmt(T.linkLater, { who: result.who })));
+    }
+  } else {
+    const who = result.kind === "domain" ? fmt(T.domainWho, { domain: result.who }) : result.who;
+    parts.push(done(fmt(T.granted, { who })));
+    const how = el("p", "mt-1");
+    how.append(...fmtNodes(T.emailHow, { url: result.url ? link(result.url, result.url) : T.noUrl }));
+    parts.push(how);
+    if (shareState.mailNoted) parts.push(el("p", NOTE, "⚠ " + T.mailOff));
+  }
+  parts.push(el("p", "mt-2 text-xs text-stone-500 dark:text-stone-400", T.restarting));
+  for (const warning of result.warnings) parts.push(el("p", NOTE, "⚠ " + warning));
+  $("share-result").replaceChildren(...parts);
+  $("share-result").hidden = false;
+}
+
+async function copyLink(input, button) {
+  try {
+    await navigator.clipboard.writeText(input.value);
+  } catch (e) {
+    input.select();
+    document.execCommand("copy");
+  }
+  button.textContent = T.copied;
+  setTimeout(() => { button.textContent = T.copy; }, 2000);
+}
+
+$("share-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  changeAccess({ action: "add", who: $("share-who").value.trim() }, $("share-add"), T.adding);
+});
+$("share-close").addEventListener("click", closeShare);
 
 async function refresh() {
   const button = $("refresh");

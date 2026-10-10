@@ -42,8 +42,25 @@ From source, in a clone of the repository:
 pip install ./small-cli
 ```
 
-**Windows.** `pip install` creates `small.exe`, which Smart App Control / Application Control may block because it
-is unsigned. If that happens, either:
+**Windows (recommended): one command in PowerShell.**
+
+```powershell
+irm https://raw.githubusercontent.com/RuslanKazyradzi13/small-software/main/install.ps1 | iex
+```
+
+It installs small into its own Python environment in `%LOCALAPPDATA%\Programs\small` and adds a `small`
+command that Smart App Control does not block (there is no unsigned `small.exe`). Needs Python 3.9+, no admin
+rights; run it again to upgrade. Uninstall:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/RuslanKazyradzi13/small-software/main/install.ps1))) -Uninstall
+```
+
+Values with `&` or `|` (URLs, for example) need PowerShell's stop-parsing token:
+`small --% env set "URL=https://x?a=1&b=2"`.
+
+**Windows with pip.** `pip install` creates `small.exe`, which Smart App Control / Application Control may
+block because it is unsigned. If that happens, either:
 
 - run small through Python, which works everywhere: `python -m small_cli deploy` (any command works this way);
 - or add the `small-cli` folder of a clone to `PATH`, and `small.cmd` will serve the `small` command. Run this in
@@ -126,12 +143,15 @@ The sample apps are in English: both the page text and the code comments.
   `small deploy` passes `ACCESS_TOKEN` from `small.json` to Railway. The app opens at
   `https://<domain>/?token=<ACCESS_TOKEN>`; without the token visitors get a 403 page with a **Request access**
   button. The server listens on `$HOST:$PORT`, by default `0.0.0.0` and the `PORT` set by Railway.
-- **The `streamlit` template.** Streamlit is not a WSGI app, so `magic_link.py` cannot wrap it. The same logic is
-  built into `app.py` as `require_access()`: the same `ACCESS_TOKEN` and `ACCESS_REQUEST_URL`, an "Invite only"
-  screen and a **Request access** form that writes an `[access-request]` line to the log. Like magic-link, the
-  access screen follows the visitor's browser language (`ACCESS_LANG` forces one). There are two differences.
-  Streamlit cannot set cookies, so the token stays in the address bar, which is how access survives a page reload.
-  And Streamlit is a single-page app, so the "no access" screen is served with HTTP 200, not 403.
+- **The `streamlit` template.** Streamlit can't be wrapped in middleware, so `require_access()` in `app.py` uses
+  `MagicLinkGate` from `magic_link.py`: the same variables (`ACCESS_EMAILS`, `ACCESS_TOKEN`, `SESSION_SECRET`,
+  `ACCESS_REQUEST_URL`...), one-time links, limits and logs as the other templates, and the access screen follows the
+  visitor's browser language. Differences:
+  - Sign-in by email: the link leads to `https://<domain>/?t=...` and shows a **Sign in** button; only the click
+    signs in. The 30-day session is a signed cookie written by a tiny same-origin frame, so unlike in the other
+    templates it is **not HttpOnly**: don't render untrusted HTML in a protected app. **Sign out** is in the sidebar.
+  - Personal links keep the token in the address bar (`?token=`), which is how they survive a page reload.
+  - Streamlit is a single-page app, so the "no access" screen is served with HTTP 200, not 403.
   Railway runs `python app.py`, and `app.py` restarts itself through `streamlit run` on `$HOST:$PORT`.
   Run it locally the same way: `python app.py`.
 - **Name.** By default, the folder name plus a random suffix, for example `my-service-3f9a`. An explicit name in
@@ -176,6 +196,12 @@ Buttons on the card of a deployed app:
   The token only goes to the browser's address bar on navigation; it is not in the dashboard page data.
 - **Logs** opens a window with the last 200 lines of the app or build log (tabs **App** / **Build**).
   Requires `RAILWAY_API_TOKEN`; without it the button is disabled.
+- **Share** opens who has access: work emails, whole domains and personal-link names (never the links
+  themselves). Type `ivan@company.com`, `@company.com` or a name and click **Add**, or click **Revoke** next to
+  anyone. It does exactly what `small access add` / `revoke` does: updates small.json and Railway and restarts
+  the app. A new personal link is shown only once, with a Copy button, and works like a password. Requires
+  `RAILWAY_API_TOKEN`. The page and its requests are protected: a per-run key, `Host`/`Origin` checks, no
+  framing, JSON only.
 
 - **Port** 3000 by default; if it is busy, any free port is used. The URL is printed to stdout.
 - **The server listens on `127.0.0.1` only** and answers 403 to requests with a foreign `Host` (DNS rebinding
@@ -218,6 +244,46 @@ $10 per GB of memory, $0.15 per GB of volume. The result reads "≈ $X/mo at cur
   measurements by 7–50×, and differently for CPU and memory, so an honest total cannot be computed from it.
 - **This is an estimate, not a bill.** Egress ($0.05/GB), the plan's free allowance ($5 on Hobby, $20 on Pro) and
   the subscription are not included. The exact amount is in Railway → Usage.
+
+## `small mcp`: AI agents (Claude Code, Cursor...)
+
+```
+small mcp
+```
+
+Runs an [MCP](https://modelcontextprotocol.io) server on stdin/stdout, so an AI coding agent can create, deploy and
+share apps itself: *"Deploy this folder and give ivan@company.com access."*
+
+**Connect it:**
+- **Claude Code:** `claude mcp add small -- small mcp` (Windows: `claude mcp add small -- cmd /c small mcp`).
+- **Cursor** (`~/.cursor/mcp.json`), **Claude Desktop**, **Windsurf** and other clients:
+
+  ```json
+  {"mcpServers": {"small": {"command": "small", "args": ["mcp"]}}}
+  ```
+
+  On Windows use `"command": "cmd", "args": ["/c", "small", "mcp"]`, or `"command": "python", "args": ["-m",
+  "small_cli", "mcp"]` if small was installed with pip.
+- `RAILWAY_API_TOKEN` must be in the environment the agent starts from. After setting it, restart the agent.
+
+**Tools:**
+
+| Tool | What it does |
+|---|---|
+| `init_app` | `small init`: a ready app from a template |
+| `deploy_app` | `small deploy`: returns the URL; progress is streamed while it builds |
+| `share_app` | `small access add`: an email, `@domain` or a personal-link name |
+| `revoke_access` | `small access revoke` |
+| `list_access` | `small access list` |
+| `list_apps` | apps under a folder with URL and latest deploy status |
+| `app_logs` | `small logs`: app or build log |
+| `set_env` | `small env set` / `unset` |
+
+- **No delete tool:** `small destroy` stays a terminal command.
+- **Prefer emails.** A personal link (a name instead of an email) is returned to the agent, so it passes through the
+  chat like any other text; with email sign-in nothing secret does.
+- The tools run the same code as the commands and answer in small's language (`SMALL_LANG`). Your MCP client
+  normally asks you before each tool call.
 
 ## `small deploy`
 
@@ -287,8 +353,7 @@ then takes effect on the next deploy.
 - Someone who is not on the list and enters their email gets the same "Check your email" response, and the owner
   receives an access request (in the log, and in Telegram if connected) with a ready-made
   `small access add their@address` command.
-- Works in the `python-http`, `fastapi` and `node-http` templates. `streamlit` supports personal links only for
-  now.
+- Works in all templates: `python-http`, `fastapi`, `node-http` and `streamlit` (see the `streamlit` notes above).
 
 *By personal invite link*:
 - **`add bob`** creates a token, adds it to `ACCESS_TOKEN` as `bob:token`, restarts the app and prints the link.
@@ -473,8 +538,8 @@ The tests start a local mock of the Railway API (GraphQL + the upload endpoint) 
 deploy, repeat deploy, failed build, crash, taken domain, several workspaces, wrong token, ignore rules.
 
 Template tests on real frameworks are skipped if the framework is not installed; the rest pass.
-- 6 `streamlit` tests: the access gate through `streamlit.testing.v1.AppTest` (with personal tokens) and the server
-  through `python app.py`.
+- `streamlit` tests: the access gate through `streamlit.testing.v1.AppTest` (personal tokens and sign-in by email:
+  form, one-time link, session cookie, revocation, sign out) and the server through `python app.py`.
 - 2 `fastapi` tests: `TestClient` and `uvicorn main:app` the way Railway runs it, plus a check that the token is
   hidden in the access log.
 

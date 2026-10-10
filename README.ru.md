@@ -45,7 +45,7 @@
 ## Быстрый старт
 
 ```bash
-pip install small-software                      # или: pipx install small-software
+pip install small-software                 # или: pipx install small-software
 export RAILWAY_API_TOKEN=...               # Railway → Account Settings → Tokens
 
 small init team-budget                     # готовое приложение со входом для приглашённых
@@ -58,6 +58,17 @@ small deploy                               # → https://team-budget.up.railway.
 <p align="center">
   <img src="docs/assets/terminal-demo.gif" alt="small init, small access add, small deploy в терминале" width="720">
 </p>
+
+### Или просто попросите ИИ-агента
+
+```bash
+claude mcp add small -- small mcp          # Claude Code; Cursor и другие MCP-клиенты — см. справочник
+```
+
+> *«Задеплой эту папку и дай доступ ivan@company.com».*
+
+Агент сам создаёт приложение, деплоит его и выдаёт доступ через `small mcp`. Доступ по почте не проводит
+секреты через чат, а удаление приложений остаётся только командой в терминале.
 
 ## Доступ как к Google Doc
 
@@ -85,6 +96,8 @@ small deploy                               # → https://team-budget.up.railway.
 | **База данных** | `small db add postgres` → `DATABASE_URL` в приложении; удаляется вместе с приложением |
 | **Сон** | `small sleep on` — без запросов приложение спит и почти ничего не стоит, просыпается за ~1,7 с |
 | **Дашборд** | `small dashboard` — все приложения, статус деплоя, оценка расхода в месяц, логи, «открыть как владелец» |
+| **Доступ без терминала** | кнопка **Поделиться** в дашборде: добавить или отозвать адрес, домен или ссылку |
+| **ИИ-агенты (MCP)** | `small mcp` — Claude Code, Cursor и другие агенты создают, деплоят и расшаривают приложения |
 | **Свой домен** | `small domain add reports.company.com` — печатает DNS-записи |
 | **Шаблоны** | `python-http` (только стандартная библиотека), `fastapi`, `node-http`, `streamlit` |
 | **Без зависимостей** | CLI — чистая стандартная библиотека Python; защита — один файл для Python и Node.js |
@@ -119,8 +132,9 @@ Starlette) и Node.js (Express, чистый `http`). `small init` кладёт 
 ## Установка
 
 - **Везде:** `pip install small-software` (или `pipx install small-software`). Python 3.9+, без зависимостей.
-- **Windows:** если Smart App Control блокирует неподписанный `small.exe`, который создаёт pip, запускайте
-  `python -m small_cli` или склонируйте репозиторий и добавьте его папку `small-cli` в `PATH` — команду обслужит `small.cmd`.
+- **Windows (рекомендуется):** в PowerShell выполните `irm https://raw.githubusercontent.com/RuslanKazyradzi13/small-software/main/install.ps1 | iex`. Установщик ставит small в
+  отдельное окружение Python и добавляет команду `small`, которую не блокирует Smart App Control (без
+  неподписанного `small.exe`). Нужен Python 3.9+, права администратора не нужны; повторный запуск обновляет small.
 - **Язык:** русский или английский — по языку системы. Задать явно: `SMALL_LANG=ru` или `SMALL_LANG=en`.
 - В `RAILWAY_API_TOKEN` нужен **токен аккаунта или workspace** (токен проекта не умеет создавать проекты).
 
@@ -132,10 +146,10 @@ Starlette) и Node.js (Express, чистый `http`). `small init` кладёт 
 - [x] Вход по рабочей почте; личные ссылки; запросы доступа в Telegram
 - [x] Русский и английский: CLI, страницы входа, письма
 - [x] `pip install small-software` из PyPI
-- [ ] Кнопка «Поделиться» в дашборде — без терминала
-- [ ] Вход по почте в шаблоне Streamlit
+- [x] Кнопка «Поделиться» в дашборде — без терминала
+- [x] Вход по почте в шаблоне Streamlit
 - [ ] Облако без своего аккаунта Railway
-- [ ] Деплой и доступ прямо из ИИ-агентов (MCP)
+- [x] Деплой и доступ прямо из ИИ-агентов (MCP)
 - [ ] Пространство компании: каталог приложений, владельцы, журнал входов
 
 ## Разработка

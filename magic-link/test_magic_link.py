@@ -16,7 +16,8 @@ from wsgiref.util import setup_testing_defaults
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import magic_link
-from magic_link import COOKIE_NAME, LINK_TTL, MagicLink, MagicLinkASGI, _cookie_value, parse_emails, parse_tokens
+from magic_link import (COOKIE_NAME, LINK_TTL, MagicLink, MagicLinkASGI, MagicLinkGate, _cookie_value, parse_emails,
+                        parse_tokens)
 
 TOKEN = "s3cret-token"
 
@@ -521,6 +522,178 @@ class EmailLoginASGITest(EmailLoginBase):
                                    body=urlencode({"t": token}).encode())[0], 403)
 
 
+def quiet(function, *args, **kwargs):
+    """(результат, вывод в лог) вызова."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        result = function(*args, **kwargs)
+    return result, out.getvalue()
+
+
+class MagicLinkGateTest(EmailLoginBase):
+    """MagicLinkGate — та же защита без middleware (для Streamlit): письма, одноразовые ссылки, сессии, лимиты."""
+
+    HEADERS = {"X-Forwarded-For": "203.0.113.7, 10.0.0.1", "Host": "evil.example", "User-Agent": "agent\n007"}
+
+    def make(self, emails=None, secret="test-secret", tokens="alice:tok-a"):
+        return quiet(MagicLinkGate, tokens=tokens, request_url="", emails=emails or self.EMAILS, secret=secret)[0]
+
+    def link(self, email="ivan@company.com", gate=None):
+        """Ссылка для входа из письма (почта перехвачена в EmailLoginBase)."""
+        before = len(self.sent)
+        self.assertEqual(quiet((gate or self.app).start_login, email, dict(self.HEADERS, **{
+            "X-Forwarded-For": "198.51.100.%d" % before}))[0], "check")
+        return self.wait_mail(before + 1)[1]
+
+    def session(self, email="ivan@company.com", gate=None):
+        return quiet((gate or self.app).finish_login, self.token_of(self.link(email, gate)))[0]
+
+    def test_settings(self):
+        self.assertEqual(self.app.emails, {"ivan@company.com", "@team.com"})
+        self.assertEqual((self.app.cookie_name, self.app.max_age, self.app.request_url), (COOKIE_NAME, 2592000, ""))
+        self.assertEqual(self.make(emails=" ").emails, frozenset())
+
+    def test_start_login_sends_a_link_to_the_public_address(self):
+        result, log = quiet(self.app.start_login, " Ivan@Company.com ", self.HEADERS)
+        self.assertEqual((result, log), ("check", ""))
+        email, link, app_name = self.wait_mail()
+        self.assertEqual((email, app_name), ("ivan@company.com", "reports.up.railway.app"))
+        self.assertTrue(link.startswith("https://reports.up.railway.app/?t="), link)  # Host из запроса не в ходу
+        self.assertEqual(self.langs, ["ru"])
+        self.app.start_login("ivan@company.com", {"accept-language": "en-US,en;q=0.9", "x-forwarded-for": "192.0.2.1"},
+                             path="/report")
+        self.assertTrue(self.wait_mail(2)[1].startswith("https://reports.up.railway.app/report?t="))
+        self.assertEqual(self.langs, ["ru", "en"])  # письмо — на языке того, кто просил вход
+        with mock.patch.dict(os.environ, {"RAILWAY_PUBLIC_DOMAIN": ""}):
+            result, log = quiet(self.app.start_login, "ivan@company.com", dict(self.HEADERS, **{
+                "X-Forwarded-For": "192.0.2.2"}))
+        self.assertEqual(result, "check")
+        self.assertIn("PUBLIC_URL", log)  # evil.example из Host не подставляется в ссылку
+        time.sleep(0.2)
+        self.assertEqual(len(self.sent), 2)
+
+    def test_unknown_address_gets_the_same_answer_and_becomes_a_request(self):
+        result, log = quiet(self.app.start_login, "stranger@evil.example", self.HEADERS)
+        self.assertEqual(result, "check")
+        self.assertEqual(log, "[access-request] contact='stranger@evil.example' ip=203.0.113.7 ua='agent\\n007'\n")
+        time.sleep(0.2)
+        self.assertEqual(self.sent, [])
+
+    def test_bad_email_and_rate_limits(self):
+        for bad in ("not-an-email", "ivan@company.com\n[magic-link] fake", "", None):
+            self.assertEqual(self.app.start_login(bad, self.HEADERS), "bad_email", bad)
+        for i in range(3):
+            self.assertEqual(self.app.start_login("ivan@company.com", {"X-Forwarded-For": "198.51.100.%d" % i}),
+                             "check")
+        self.assertEqual(self.app.start_login("ivan@company.com", {"X-Forwarded-For": "198.51.100.9"}), "slow")
+        for i in range(10):  # с одного IP — не больше 10 писем, на любые адреса
+            self.assertEqual(quiet(self.app.start_login, "u%d@team.com" % i, self.HEADERS)[0], "check")
+        self.assertEqual(self.app.start_login("olga@team.com", self.HEADERS), "slow")
+
+    def test_link_signs_in_once_and_only_by_finish(self):
+        token = self.token_of(self.link())
+        for _ in range(2):  # открытие ссылки (или почтовый сканер) её не тратит
+            self.assertEqual(self.app.login_email(token), "ivan@company.com")
+        session, log = quiet(self.app.finish_login, token, self.HEADERS)
+        self.assertTrue(session.startswith("e."), session)
+        self.assertEqual(log, "[magic-link] вход по почте (ivan@company.com), ip=203.0.113.7\n")
+        self.assertEqual(self.app.session_owner(session), "ivan@company.com")
+        self.assertIsNone(self.app.finish_login(token))
+        self.assertIsNone(self.app.login_email(token))
+
+    def test_link_is_spent_once_under_concurrency(self):
+        token = self.token_of(self.link())
+        barrier, results = threading.Barrier(8), []
+
+        def finish():
+            barrier.wait()
+            results.append(self.app.finish_login(token))
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            threads = [threading.Thread(target=finish) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(len([r for r in results if r]), 1)
+        self.assertEqual(out.getvalue().count("вход по почте"), 1)
+
+    def test_bad_links_are_rejected(self):
+        token = self.token_of(self.link())
+        with mock.patch("magic_link.time.time", return_value=time.time() + LINK_TTL + 1):
+            self.assertIsNone(self.app.login_email(token))
+            self.assertIsNone(self.app.finish_login(token))
+        payload, mac = token.split(".")
+        forged = magic_link._b64(json.dumps({"e": "boss@company.com", "x": 9999999999, "n": "x"}).encode())
+        for bad in (payload + "." + mac[:-2] + ("AA" if mac[-2:] != "AA" else "BB"), forged + "." + mac, "", None, 42):
+            self.assertIsNone(self.app.login_email(bad), bad)
+            self.assertIsNone(self.app.finish_login(bad), bad)
+        self.assertIsNone(self.make(secret="another-secret").login_email(token))
+        self.assertIsNone(self.make(emails="@team.com").login_email(token))  # адрес убрали из ACCESS_EMAILS
+        stranger = self.app.login_link("stranger@evil.example", "https://reports.up.railway.app")
+        self.assertIsNone(self.app.login_email(self.token_of(stranger)))  # подписана, но адреса нет в списке
+        self.assertEqual(self.app.login_email(token), "ivan@company.com")
+
+    def test_session_owner_and_revocation(self):
+        session = self.session()
+        team = self.session("olga@team.com")
+        self.assertEqual((self.app.session_owner(session), self.app.session_owner(team)),
+                         ("ivan@company.com", "olga@team.com"))
+        revoked = self.make(emails="@team.com")  # ivan убран из ACCESS_EMAILS, секрет тот же
+        self.assertIsNone(revoked.session_owner(session))
+        self.assertEqual(revoked.session_owner(team), "olga@team.com")
+        self.assertIsNone(self.make(secret="another-secret").session_owner(session))
+        payload, mac = session[2:].split(".")
+        forged = magic_link._b64(json.dumps({"e": "boss@company.com", "x": 9999999999}).encode())
+        login_token = self.token_of(self.link())
+        for bad in ("e.%s.%s" % (forged, mac), "e." + login_token, session[:-3], "", None, mock.MagicMock()):
+            self.assertIsNone(self.app.session_owner(bad), bad)  # подпись чужого назначения тоже не годится
+        with mock.patch("magic_link.time.time", return_value=time.time() + magic_link.COOKIE_MAX_AGE + 1):
+            self.assertIsNone(self.app.session_owner(session))  # 30 дней прошли
+
+    def test_sessions_are_shared_with_the_middleware(self):
+        session = self.session()
+        middleware = super().make()  # MagicLink с тем же SESSION_SECRET
+        self.assertEqual(call(middleware, cookie="%s=%s" % (COOKIE_NAME, session))[2], "secret page")
+        cookie = self.login(app=middleware)  # и наоборот: кука от MagicLink подходит MagicLinkGate
+        self.assertEqual(self.app.session_owner(cookie.split("=", 1)[1]), "ivan@company.com")
+
+    def test_invitation_tokens(self):
+        name, log = quiet(self.app.token_login, "tok-a", self.HEADERS)
+        self.assertEqual((name, log), ("alice", "[magic-link] вход по ссылке (alice), ip=203.0.113.7\n"))
+        self.assertEqual(quiet(self.make(tokens="tok-b").token_login, "tok-b")[0], "")  # общая ссылка, без имени
+        for bad in ("wrong", "", None, "tok-a "):
+            self.assertEqual(quiet(self.app.token_login, bad), (None, ""), bad)
+        self.assertEqual(self.app.session_owner(_cookie_value("tok-a")), "alice")  # кука MagicLink по токену
+
+    def test_texts_and_language(self):
+        self.assertEqual(self.app.lang({"Accept-Language": "en-US,en;q=0.9,ru;q=0.8"}), "en")
+        self.assertEqual((self.app.lang({}), self.app.lang(None)), ("ru", "ru"))
+        with mock.patch.dict(os.environ, {"ACCESS_LANG": "en"}):
+            forced = self.make()
+        self.assertEqual(forced.lang({"accept-language": "ru"}), "en")
+        self.assertEqual(MagicLinkGate.text("check", "en")[:2], ("✉️", "Check your email"))
+        self.assertEqual(MagicLinkGate.text("confirm", "ru", "ivan@company.com"),
+                         ("\U0001f512", "Вход в приложение", "Нажмите кнопку, чтобы войти как ivan@company.com."))
+        self.assertEqual(MagicLinkGate.text("login", "de")[1], "Вход по рабочей почте")
+        self.assertEqual((MagicLinkGate.label("sign_in", "en"), MagicLinkGate.label("get_link", "ru")),
+                         ("Sign in", "Получить ссылку для входа"))
+
+    def test_request_access_is_one_log_line(self):
+        _, log = quiet(self.app.request_access, " me@example.com\n[access-request] fake " + "x" * 300, self.HEADERS)
+        self.assertEqual(log.count("\n"), 1)
+        self.assertIn("[access-request] contact='me@example.com\\n[access-request] fake xxx", log)
+        self.assertIn("' ip=203.0.113.7 ua='agent\\n007'", log)
+        self.assertLess(len(log), 300)  # контакт обрезан до 200 символов
+
+    def test_login_link_for_other_delivery(self):
+        link = self.app.login_link(" Ivan@Company.com", "https://reports.company.com/", "/")
+        self.assertTrue(link.startswith("https://reports.company.com/?t="), link)
+        self.assertEqual(self.app.login_email(self.token_of(link)), "ivan@company.com")
+
+
+
 class MailServer:
     """Мок Resend API: запоминает POST /emails, отвечает заданным кодом."""
 
@@ -721,6 +894,12 @@ class TelegramTest(unittest.TestCase):
             app = MagicLink(secret_app, tokens="", request_url="", emails="ivan@company.com", secret="s")
         call(app, path="/_access/login", method="POST", body=b"email=bob%40example.com",
              headers={"HTTP_HOST": "shop.up.railway.app", "HTTP_X_FORWARDED_FOR": "203.0.113.7"})
+        self.check_message()
+        self.assertIn("small access add bob@example.com", self.inbox.messages[0][1]["text"])
+
+    def test_gate_request_access(self):
+        gate = MagicLinkGate(tokens=TOKEN, request_url="")
+        quiet(gate.request_access, "bob@example.com", {"Host": "shop.up.railway.app", "X-Forwarded-For": "203.0.113.7"})
         self.check_message()
         self.assertIn("small access add bob@example.com", self.inbox.messages[0][1]["text"])
 

@@ -692,7 +692,7 @@ class InitTest(unittest.TestCase):
     @unittest.skipUnless(MAGIC_LINK_DIR.is_dir(), "нет папки magic-link с исходниками middleware")
     def test_template_middleware_matches_source(self):
         for template, name in (("python-http", "magic_link.py"), ("fastapi", "magic_link.py"),
-                               ("node-http", "magic-link.js")):
+                               ("streamlit", "magic_link.py"), ("node-http", "magic-link.js")):
             self.assertEqual((TEMPLATES_DIR / template / name).read_bytes(), (MAGIC_LINK_DIR / name).read_bytes(),
                              "%s в шаблоне %s разошёлся с magic-link/%s" % (name, template, name))
 
@@ -957,7 +957,7 @@ class StreamlitTemplateTest(unittest.TestCase):
 
     def test_files(self):
         self.assertEqual(sorted(os.listdir(self.app)),
-                         [".gitignore", ".railwayignore", "app.py", "requirements.txt", "small.json"])
+                         [".gitignore", ".railwayignore", "app.py", "magic_link.py", "requirements.txt", "small.json"])
         self.assertRegex(Path(self.app, "requirements.txt").read_text(encoding="utf-8"), r"(?m)^streamlit\b")
         source = Path(self.app, "app.py").read_text(encoding="utf-8")
         compile(source, "app.py", "exec")
@@ -973,7 +973,8 @@ class StreamlitTemplateTest(unittest.TestCase):
         code, _, err = run(["deploy", self.app, "--interval", "0"],
                            {"RAILWAY_API_TOKEN": TOKEN, "SMALL_API_URL": server.url})
         self.assertEqual(code, 0, err)
-        self.assertEqual(server.uploads, [["./.gitignore", "./.railwayignore", "./app.py", "./requirements.txt"]])
+        self.assertEqual(server.uploads,
+                         [["./.gitignore", "./.railwayignore", "./app.py", "./magic_link.py", "./requirements.txt"]])
         self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"],
                          {"ACCESS_TOKEN": self.token, "OWNER_LANG": "ru"})
 

@@ -95,20 +95,32 @@ def invite_link(domain, token):
 
 
 def email_login_problem(root):
-    """None — код приложения умеет вход по почте; иначе — что мешает и как исправить."""
-    for name, template in (("magic_link.py", "python-http"), ("magic-link.js", "node-http")):
+    """None — код приложения умеет вход по почте; иначе — что мешает и как исправить.
+
+    Streamlit нельзя обернуть middleware: вход по почте там делает require_access() в app.py через MagicLinkGate
+    из magic_link.py, поэтому нужны новые версии обоих файлов."""
+    app = root / "app.py"
+    source = app.read_text(encoding="utf-8", errors="replace") if app.is_file() else ""
+    streamlit = "streamlit" in source
+    if streamlit and "MagicLinkGate" not in source:
+        return (tr("app.py is from an old streamlit template without sign-in by email. Take require_access() from "
+                   "the new app.py, and magic_link.py next to it: %s (or grant a personal link: small access add NAME)",
+                   "app.py — из старого шаблона streamlit, без входа по почте. Возьмите require_access() из нового "
+                   "app.py и magic_link.py рядом с ним: %s (или выдайте личную ссылку: small access add ИМЯ)")
+                % (TEMPLATES_DIR / "streamlit"))
+    for name, template in (("magic_link.py", "streamlit" if streamlit else "python-http"),
+                           ("magic-link.js", "node-http")):
         path = root / name
         if path.is_file():
-            if "ACCESS_EMAILS" in path.read_text(encoding="utf-8", errors="replace"):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if "ACCESS_EMAILS" in text and (not streamlit or "MagicLinkGate" in text):
                 return None
             return (tr("%s in the app is an old version and does not support sign-in by email. "
                        "Replace it with the new one: %s",
                        "%s в приложении старой версии и не знает входа по почте. Замените его новым: %s")
                     % (name, TEMPLATES_DIR / template / name))
-    app = root / "app.py"
-    if app.is_file() and "streamlit" in app.read_text(encoding="utf-8", errors="replace"):
-        return tr("the streamlit template does not support sign-in by email yet — "
-                  "grant a personal link instead: small access add NAME",
-                  "в шаблоне streamlit вход по почте пока не поддерживается — "
-                  "выдайте личную ссылку: small access add ИМЯ")
+    if streamlit:
+        return (tr("magic_link.py is missing next to app.py. Copy it from the template: %s",
+                   "рядом с app.py нет magic_link.py. Скопируйте его из шаблона: %s")
+                % (TEMPLATES_DIR / "streamlit" / "magic_link.py"))
     return None

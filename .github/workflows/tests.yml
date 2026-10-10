@@ -74,6 +74,102 @@ jobs:
           test -f demo/app.py && test -f demo/magic_link.py && test -f demo/small.json
           python -c "import re, sys; t = open('out.txt', encoding='utf-8').read(); c = re.findall('[Ѐ-ӿ]+', t); sys.exit('Cyrillic in English output: %s' % c if c else 0)"
 
+  windows-installer:
+    name: small-cli · установщик install.ps1 · ${{ matrix.ps }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ps: [powershell, pwsh]  # install.ps1 запускается в Windows PowerShell 5.1 и в PowerShell 7
+    defaults:
+      run:
+        shell: pwsh  # сами проверки — всегда в pwsh; от матрицы зависит только то, чем запущен install.ps1
+    env:
+      SMALL_NO_PATH: "1"  # PATH пользователя не трогаем (кроме последнего шага)
+      SMALL_LANG: en
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Сборка wheel
+        working-directory: small-cli
+        run: |
+          python -m pip install build
+          python -m build
+      - name: Установка из wheel во временную папку
+        run: |
+          $wheel = (Get-ChildItem small-cli/dist/*.whl).FullName
+          $dir = Join-Path $env:RUNNER_TEMP 'small-install'
+          "SMALL_PACKAGE=$wheel" >> $env:GITHUB_ENV
+          "SMALL_INSTALL_DIR=$dir" >> $env:GITHUB_ENV
+          $env:SMALL_PACKAGE = $wheel
+          $env:SMALL_INSTALL_DIR = $dir
+          ${{ matrix.ps }} -NoProfile -ExecutionPolicy Bypass -File install.ps1
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1: exit code $LASTEXITCODE" }
+      - name: small.cmd — версия, small init, аргументы с пробелами, коды выхода
+        working-directory: ${{ runner.temp }}
+        run: |
+          $small = Join-Path $env:SMALL_INSTALL_DIR 'bin\small.cmd'
+          $toml = Get-Content (Join-Path $env:GITHUB_WORKSPACE 'small-cli/pyproject.toml') -Raw
+          if ($toml -notmatch '(?m)^version = "([^"]+)"') { throw 'no version in pyproject.toml' }
+          $expected = "small $($Matches[1])"
+          $version = & $small --version
+          if ($LASTEXITCODE -ne 0 -or $version -ne $expected) { throw "small --version: '$version', expected '$expected'" }
+          & $small init demo
+          if ($LASTEXITCODE -ne 0) { throw "small init: exit code $LASTEXITCODE" }
+          foreach ($f in 'demo/app.py', 'demo/magic_link.py', 'demo/small.json') {
+            if (-not (Test-Path $f)) { throw "$f was not created" }
+          }
+          & $small init 'demo with spaces' --name 'Team Budget'
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path 'demo with spaces/small.json')) { throw 'a path with spaces did not pass through' }
+          if ((Get-Content 'demo with spaces/small.json' -Raw | ConvertFrom-Json).name -ne 'team-budget') { throw '--name with a space did not pass through' }
+          & $small no-such-command 2>$null
+          if ($LASTEXITCODE -ne 2) { throw "an unknown command must exit with 2 (argparse), got $LASTEXITCODE" }
+          & $small init demo/app.py 2>$null
+          if ($LASTEXITCODE -ne 1) { throw "a CLI error must exit with 1, got $LASTEXITCODE" }
+          $global:LASTEXITCODE = 0
+      - name: Повторный запуск обновляет на месте
+        run: |
+          ${{ matrix.ps }} -NoProfile -ExecutionPolicy Bypass -File install.ps1
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 (second run): exit code $LASTEXITCODE" }
+          & (Join-Path $env:SMALL_INSTALL_DIR 'bin\small.cmd') --version
+          if ($LASTEXITCODE -ne 0) { throw "small --version after the second run: exit code $LASTEXITCODE" }
+      - name: Ошибка pip — ненулевой код выхода, а -Uninstall убирает остатки
+        run: |
+          $env:SMALL_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'small-broken'
+          $env:SMALL_PACKAGE = Join-Path $env:RUNNER_TEMP 'no-such-package.whl'
+          ${{ matrix.ps }} -NoProfile -ExecutionPolicy Bypass -File install.ps1
+          if ($LASTEXITCODE -eq 0) { throw 'install.ps1 must fail when pip fails' }
+          ${{ matrix.ps }} -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+          if ($LASTEXITCODE -ne 0 -or (Test-Path $env:SMALL_INSTALL_DIR)) { throw '-Uninstall did not clean up after a failed install' }
+      - name: Удаление (-Uninstall)
+        run: |
+          ${{ matrix.ps }} -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 -Uninstall: exit code $LASTEXITCODE" }
+          if (Test-Path $env:SMALL_INSTALL_DIR) { throw "$env:SMALL_INSTALL_DIR still exists" }
+      - name: PATH пользователя — запись и удаление (машина CI одноразовая)
+        env:
+          SMALL_NO_PATH: "0"
+        run: |
+          $read = { (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames') }
+          $before = & $read
+          $bin = Join-Path $env:SMALL_INSTALL_DIR 'bin'
+          ${{ matrix.ps }} -NoProfile -ExecutionPolicy Bypass -File install.ps1
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1: exit code $LASTEXITCODE" }
+          $after = & $read
+          if ($after -ne $bin -and -not $after.StartsWith("$bin;")) { throw "the user PATH does not start with ${bin}: $after" }
+          # PATH нового окна: системный, затем пользовательский — small должен найтись как small.cmd
+          $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+          $found = (Get-Command small).Source
+          if ($found -ne (Join-Path $bin 'small.cmd')) { throw "small resolves to $found" }
+          small --version
+          if ($LASTEXITCODE -ne 0) { throw "small --version via PATH: exit code $LASTEXITCODE" }
+          ${{ matrix.ps }} -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 -Uninstall: exit code $LASTEXITCODE" }
+          if ((& $read) -cne $before) { throw "the user PATH was not restored: $(& $read)" }
+          if (Test-Path $env:SMALL_INSTALL_DIR) { throw "$env:SMALL_INSTALL_DIR still exists" }
+
   magic-link:
     name: magic-link · Python + Node.js
     runs-on: ubuntu-latest

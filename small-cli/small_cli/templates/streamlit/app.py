@@ -1,18 +1,25 @@
 """A Streamlit app created by `small init --template streamlit`. Deploy it with `small deploy`.
 
 Locally: `python app.py` (or `streamlit run app.py`).
-Access is by personal invite link https://<domain>/?token=<ACCESS_TOKEN> (`small access add bob`); the check is
-require_access() below. Build your own interface after the require_access() call.
+Who gets in is decided by require_access() below, built on MagicLinkGate from magic_link.py: people you invite by
+work email (`small access add ivan@company.com`) or with a personal invite link (`small access add bob`).
+Build your own interface after the require_access() call.
 """
 
-import hmac
+import hashlib
 import json
 import os
+import re
 import sys
-import urllib.request
 
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if APP_DIR not in sys.path:  # magic_link.py sits next to app.py; not every runner puts this folder on sys.path
+    sys.path.insert(0, APP_DIR)
+from magic_link import MagicLinkGate  # noqa: E402
 
 if __name__ == "__main__" and get_script_run_ctx(suppress_warning=True) is None:
     # Railway runs `python app.py`, which Streamlit does not support — restart through `streamlit run`.
@@ -31,126 +38,187 @@ import pandas as pd  # noqa: E402
 
 st.set_page_config(page_title="small · Streamlit", page_icon="🚀", layout="wide")
 
-# The access screen speaks the visitor's language (Accept-Language or ACCESS_LANG=ru|en), like magic_link.py.
-GATE = {
-    "en": {"forbidden": "Invite only", "invalid": "This link is not valid",
-           "forbidden_text": "This app opens only with an invite link from its owner.",
-           "invalid_text": "The link has expired or was copied incompletely. Ask for a new one.",
-           "request": "Request access", "contact": "Email or Telegram to reply to",
-           "sent": "Request sent. The owner will see it and send you an invite link.",
-           "no_contact": "Tell us how to reach you."},
-    "ru": {"forbidden": "Доступ по приглашению", "invalid": "Ссылка недействительна",
-           "forbidden_text": "Это приложение открывается только по ссылке-приглашению от владельца.",
-           "invalid_text": "Ссылка устарела или скопирована не полностью. Запросите новую.",
-           "request": "Запросить доступ", "contact": "Email или Telegram для ответа",
-           "sent": "Запрос отправлен. Владелец увидит его и пришлёт вам ссылку-приглашение.",
-           "no_contact": "Укажите, как с вами связаться."},
+# ---------- Access: magic_link.py for Streamlit ----------
+
+# Settings that MagicLinkGate reads when it starts: a change (for example, a revoked address) gives a new gate.
+GATE_SETTINGS = ("ACCESS_TOKEN", "ACCESS_EMAILS", "SESSION_SECRET", "ACCESS_REQUEST_URL", "ACCESS_LANG",
+                 "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+
+# Streamlit-only labels. Everything else comes from magic_link's MESSAGES and UI, in the visitor's language.
+LABELS = {
+    "en": {"email": "Work email", "no_contact": "Tell us how to reach you.", "signed_in": "Signed in as %s",
+           "sign_out": "Sign out"},
+    "ru": {"email": "Рабочая почта", "no_contact": "Укажите, как с вами связаться.", "signed_in": "Вы вошли как %s",
+           "sign_out": "Выйти"},
 }
 
 
-def _header(name):
-    return st.context.headers.get(name, "") if hasattr(st, "context") else ""
+@st.cache_resource(show_spinner=False)
+def _make_gate(settings_hash):
+    # One gate per process: used sign-in links and email rate limits must be shared by all visitors.
+    return MagicLinkGate()
 
 
-def _visitor_lang():
-    setting = os.environ.get("ACCESS_LANG", "auto").strip().lower()
-    if setting in GATE:
-        return setting
-    header = _header("accept-language")
-    if not header.strip():
-        return "ru"
-    best, best_q = "en", -1.0  # any other language (de, fr…) gets English
-    for part in header.split(","):
-        tag, _, params = part.strip().partition(";")
-        base = tag.strip().lower().split("-")[0]
-        base = "ru" if base == "*" else base
-        try:
-            q = float(params.strip()[2:]) if params.strip().startswith("q=") else 1.0
-        except ValueError:
-            q = 0.0
-        if base in GATE and q > best_q:
-            best, best_q = base, q
-    return best
+def _gate():
+    settings = json.dumps([os.environ.get(name, "") for name in GATE_SETTINGS])
+    return _make_gate(hashlib.sha256(settings.encode("utf-8")).hexdigest())
 
 
-def _for_owner(en, ru):
-    """Logs and Telegram messages are for the owner: OWNER_LANG=ru|en (small deploy sets it)."""
-    return ru if os.environ.get("OWNER_LANG", "").strip().lower()[:2] == "ru" else en
+def _md(text):
+    """Escape Markdown, so that an address like ivan_petrov@company.com is shown as is."""
+    return re.sub(r"([!-/:-@\[-`{-~])", r"\\\1", text)
 
 
-@st.cache_resource
-def _warn_once(message):
-    print(message, flush=True)
+def _write_cookie(name, value, max_age):
+    """Write the session cookie (max_age=0 deletes it) from the browser.
+
+    Streamlit gives the script no way to send a Set-Cookie header, so a tiny frame does it in JavaScript. The frame is
+    same-origin (Streamlit's iframe sandbox includes allow-same-origin), so it writes the cookie of the app itself.
+    Trade-off: a cookie written by JavaScript cannot be HttpOnly, so any script running in this page could read it.
+    The value is signed, expires in 30 days and stops working once the address leaves ACCESS_EMAILS or
+    SESSION_SECRET changes; SameSite=Lax keeps other sites from using it. Never render untrusted HTML or JavaScript
+    in a protected app (unsafe_allow_html, components, st.iframe): it could steal the session.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_.-]*", value):  # signed values are base64url: nothing to escape in the script
+        raise ValueError("unexpected cookie value")
+    cookie = "%s=%s; Path=/; Max-Age=%d; SameSite=Lax" % (name, value, max_age)
+    script = ("<script>var page = window.parent; page.document.cookie = %s + "
+              "(page.location.protocol === 'https:' ? '; Secure' : '');</script>") % json.dumps(cookie)
+    if hasattr(st, "iframe"):  # newer Streamlit deprecates components.v1.html in favour of st.iframe
+        st.iframe(script, height=1)
+    else:
+        components.html(script, height=0)
 
 
-def _notify_telegram(contact):
-    """With TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID set (small notify telegram), the request reaches the owner."""
-    token, chat = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(), os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    if not (token and chat):
+def _session_cookie(name):
+    """The session of this visitor: started in this browser tab, or sent by the browser when the page opened."""
+    state = st.session_state
+    if "small_session" in state:
+        return state.small_session
+    if state.get("small_signed_out"):
+        return None  # st.context.cookies still shows the cookie the page was opened with
+    value = st.context.cookies.get(name)  # what the browser sent when the page opened; later changes need a reload
+    return value if isinstance(value, str) else None
+
+
+def _sign_out():
+    st.session_state.pop("small_session", None)
+    st.session_state.small_signed_out = True
+    st.session_state.small_clear_cookie = True
+
+
+def _email_form(gate, lang):
+    with st.form("small_login"):
+        email = st.text_input(LABELS[lang]["email"], max_chars=254, placeholder="name@company.com",
+                              autocomplete="email")
+        if st.form_submit_button(gate.label("get_link", lang), type="primary"):
+            # The answer is the same for known and unknown addresses; an unknown one becomes an access request.
+            result = gate.start_login(email, st.context.headers)
+            if result == "check":
+                st.session_state.small_mail_sent = True
+                st.rerun()
+            _, title, text = gate.text(result, lang)
+            st.warning("%s. %s" % (title, text))
+
+
+def _request_form(gate, lang):
+    if st.session_state.get("access_requested"):
+        _, title, text = gate.text("sent", lang)
+        st.success("%s. %s" % (title, text))
         return
-    host = _header("host") or _for_owner("the app", "приложению")
-    text = _for_owner("🔑 Access request to %s\nContact: %s\n\nSend a personal link: small access add NAME",
-                      "🔑 Запрос доступа к %s\nКонтакт: %s\n\nВыдать личную ссылку: small access add ИМЯ") % (host, contact)
-    api = os.environ.get("TELEGRAM_API_URL", "https://api.telegram.org").rstrip("/")
-    request = urllib.request.Request("%s/bot%s/sendMessage" % (api, token), headers={"Content-Type": "application/json"},
-                                     data=json.dumps({"chat_id": chat, "text": text}).encode("utf-8"))
-    try:
-        urllib.request.urlopen(request, timeout=10).close()
-    except Exception as e:  # a failed notification must not break the page; never log the bot token
-        print(_for_owner("[magic-link] could not send the access request to Telegram: %s",
-                         "[magic-link] не удалось отправить запрос доступа в Telegram: %s") % type(e).__name__,
-              flush=True)
+    with st.form("access_request"):
+        contact = st.text_input(gate.label("contact", lang), max_chars=200)
+        if st.form_submit_button(gate.label("request", lang), type="primary"):
+            if contact.strip():
+                # Goes to the log as repr() (a visitor cannot forge log lines) and to Telegram, if connected.
+                gate.request_access(contact, st.context.headers)
+                st.session_state.access_requested = True
+                st.rerun()
+            else:
+                st.warning(LABELS[lang]["no_contact"])
+
+
+def _screen(gate, lang, kind, email=""):
+    """The access screen with magic_link's texts. Returns True when the "Sign in" button (kind="confirm") is clicked."""
+    icon, title, text = gate.text("login" if kind == "forbidden" and gate.emails else kind, lang, _md(email))
+    _, center, _ = st.columns([1, 2, 1])
+    with center:
+        st.markdown("## %s %s" % (icon, title))
+        st.write(text)
+        if kind == "confirm":
+            return st.button(gate.label("sign_in", lang), type="primary", key="small_sign_in")
+        if kind == "check":
+            st.button(gate.label("other", lang), on_click=st.session_state.pop, args=("small_mail_sent", None))
+        elif gate.emails:
+            _email_form(gate, lang)
+        elif gate.request_url:
+            st.link_button(gate.label("request", lang), gate.request_url, type="primary")
+        else:
+            _request_form(gate, lang)
+    return False
 
 
 def require_access():
-    """magic_link.py for Streamlit: lets people in only with ?token=<ACCESS_TOKEN>.
+    """magic_link.py for Streamlit: lets in invited people only; everyone else gets an access screen (st.stop()).
 
-    Streamlit cannot set cookies, so the token stays in the address — that way access survives a page reload.
-    Without a valid token the visitor sees an "Invite only" screen with a "Request access" button.
+    Returns who is signed in: an email address, or a name from ACCESS_TOKEN ("" for the shared link).
+    The rules, settings, emails, logs and texts are magic_link's (MagicLinkGate), with these Streamlit specifics:
+      * Sign-in by email (ACCESS_EMAILS): the visitor enters a work email and gets a link <app>/?t=... that works for
+        15 minutes, once. Opening it shows a "Sign in" button: mail scanners open links too, so only a click signs in.
+        The browser keeps the session for 30 days in a signed cookie (see _write_cookie); "Sign out" is in the sidebar.
+      * Personal invite links ?token=<ACCESS_TOKEN>: the token stays in the address, which is how access survives a
+        page reload.
+      * Streamlit is a single-page app, so the access screen is served with HTTP 200, not 403.
     ACCESS_TOKEN — comma-separated tokens, optionally named: "alice:token1,bob:token2" (as `small access` keeps them);
-    ACCESS_REQUEST_URL — where the button leads.
+    ACCESS_REQUEST_URL — where the "Request access" button leads when sign-in by email is off.
     """
-    if st.session_state.get("access_granted"):
-        return
-    entries = []  # "alice:token1,bob:token2" -> [("alice", "token1"), ("bob", "token2")]
-    for item in os.environ.get("ACCESS_TOKEN", "").split(","):
-        name, _, token = item.strip().rpartition(":")
-        if token.strip():
-            entries.append((name.strip(), token.strip()))
-    if not entries:
-        _warn_once(_for_owner("[magic-link] ACCESS_TOKEN is not set: nobody can get in",
-                              "[magic-link] ACCESS_TOKEN не задан: доступ закрыт для всех"))
-    given = st.query_params.get("token")
-    owner = next((name for name, token in entries
-                  if given is not None and hmac.compare_digest(given.encode(), token.encode())), None)
-    if owner is not None:
-        st.session_state.access_granted = True
-        print(_for_owner("[magic-link] signed in by link%s", "[magic-link] вход по ссылке%s")
-              % (" (%s)" % owner if owner else ""), flush=True)
-        return
+    gate = _gate()
+    headers = st.context.headers  # sent when the page opened: IP (X-Forwarded-For), Host, language
+    lang = gate.lang(headers)
+    state = st.session_state
+    if state.get("access_granted"):  # a personal link was accepted earlier in this session
+        return state.get("access_name", "")
 
-    t = GATE[_visitor_lang()]
-    _, center, _ = st.columns([1, 2, 1])
-    with center:
-        st.markdown("## 🔒 " + (t["invalid"] if given is not None else t["forbidden"]))
-        st.write(t["invalid_text"] if given is not None else t["forbidden_text"])
-        request_url = os.environ.get("ACCESS_REQUEST_URL", "")
-        if request_url:
-            st.link_button(t["request"], request_url, type="primary")
-        elif st.session_state.get("access_requested"):
-            st.success(t["sent"])
-        else:
-            with st.form("access_request"):
-                contact = st.text_input(t["contact"], max_chars=200)
-                if st.form_submit_button(t["request"], type="primary"):
-                    if contact.strip():
-                        # repr() escapes line breaks, so a visitor cannot forge log lines.
-                        print("[access-request] contact=%r" % contact.strip(), flush=True)
-                        _notify_telegram(contact.strip()[:200])
-                        st.session_state.access_requested = True
-                        st.rerun()
-                    else:
-                        st.warning(t["no_contact"])
+    token = st.query_params.get("token")
+    if token is not None:
+        name = gate.token_login(token, headers)
+        if name is None:
+            _screen(gate, lang, "invalid")
+            st.stop()
+        state.access_granted, state.access_name = True, name
+        return name
+
+    link = st.query_params.get("t") if gate.emails else None
+    if link is not None:
+        email = gate.login_email(link)  # checks the link without spending it
+        if email is None:
+            st.query_params.clear()
+            _screen(gate, lang, "expired")
+            st.stop()
+        if _screen(gate, lang, "confirm", email):
+            session = gate.finish_login(link, headers)  # spends the link, once
+            if session is not None:
+                st.query_params.clear()
+                state.small_session, state.small_write_cookie = session, True
+                state.pop("small_signed_out", None)
+            st.rerun()  # without a session the link is shown as expired
+        st.stop()
+
+    owner = gate.session_owner(_session_cookie(gate.cookie_name))
+    if owner is not None:
+        if state.pop("small_write_cookie", False):
+            _write_cookie(gate.cookie_name, state.small_session, gate.max_age)
+        with st.sidebar:
+            st.caption(LABELS[lang]["signed_in"] % _md(owner))
+            st.button(LABELS[lang]["sign_out"], on_click=_sign_out, key="small_sign_out")
+        return owner
+
+    if state.pop("small_clear_cookie", False):
+        _write_cookie(gate.cookie_name, "", 0)
+    if state.get("small_mail_sent"):
+        _screen(gate, lang, "check")
+    else:
+        _screen(gate, lang, "logout" if state.get("small_signed_out") and gate.emails else "forbidden")
     st.stop()
 
 

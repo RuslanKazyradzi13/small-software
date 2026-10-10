@@ -25,8 +25,8 @@ TEMPLATES = {
         "gitignore": ["__pycache__/", "*.pyc", ".venv/", "venv/"],
     },
     "streamlit": {
-        "description": ("Streamlit: interactive Python UI, invite-link sign-in built into app.py",
-                        "Streamlit: интерактивный интерфейс на Python, вход по ссылке встроен в app.py"),
+        "description": ("Streamlit: interactive Python UI, protected by MagicLinkGate from magic_link.py",
+                        "Streamlit: интерактивный интерфейс на Python, защита MagicLinkGate из magic_link.py"),
         "gitignore": ["__pycache__/", "*.pyc", ".venv/", "venv/", ".streamlit/secrets.toml"],
     },
 }
