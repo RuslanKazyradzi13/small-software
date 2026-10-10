@@ -6,8 +6,10 @@
 """
 
 import hmac
+import json
 import os
 import sys
+import urllib.request
 
 import streamlit as st
 from streamlit.runtime.scriptrunner import get_script_run_ctx
@@ -33,6 +35,22 @@ st.set_page_config(page_title="small · Streamlit", page_icon="🚀", layout="wi
 @st.cache_resource
 def _warn_once(message):
     print(message, flush=True)
+
+
+def _notify_telegram(contact):
+    """Если заданы TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID (small notify telegram), запрос приходит владельцу."""
+    token, chat = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(), os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not (token and chat):
+        return
+    host = st.context.headers.get("host", "") if hasattr(st, "context") else ""
+    text = "🔑 Запрос доступа к %s\nКонтакт: %s\n\nВыдать личную ссылку: small access add ИМЯ" % (host or "приложению", contact)
+    api = os.environ.get("TELEGRAM_API_URL", "https://api.telegram.org").rstrip("/")
+    request = urllib.request.Request("%s/bot%s/sendMessage" % (api, token), headers={"Content-Type": "application/json"},
+                                     data=json.dumps({"chat_id": chat, "text": text}).encode("utf-8"))
+    try:
+        urllib.request.urlopen(request, timeout=10).close()
+    except Exception as e:  # уведомление — не повод ронять страницу; токен бота в лог не пишем
+        print("[magic-link] не удалось отправить запрос доступа в Telegram: %s" % type(e).__name__, flush=True)
 
 
 def require_access():
@@ -79,6 +97,7 @@ def require_access():
                     if contact.strip():
                         # repr() экранирует переводы строк: пользователь не подделает строки лога.
                         print("[access-request] contact=%r" % contact.strip(), flush=True)
+                        _notify_telegram(contact.strip()[:200])
                         st.session_state.access_requested = True
                         st.rerun()
                     else:

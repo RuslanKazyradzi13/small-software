@@ -13,12 +13,18 @@
                         у остальных всё работает. Не задан — доступ закрыт для всех.
     ACCESS_REQUEST_URL  куда ведёт кнопка (mailto:..., https://t.me/...). Не задан — кнопка отправляет
                         форму в само приложение, и запрос печатается в лог строкой [access-request]
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+                        если заданы, запрос из формы ещё и приходит владельцу в Telegram
+                        (подключить: small notify telegram)
 """
 
 import hashlib
 import hmac
 import html
+import json
 import os
+import threading
+import urllib.request
 from http.cookies import CookieError, SimpleCookie
 from string import Template
 from urllib.parse import parse_qsl, quote, urlencode
@@ -54,6 +60,7 @@ class _Gate:
         self.cookies = [(name, _cookie_value(token)) for name, token in self.entries]
         self.request_url = os.environ.get("ACCESS_REQUEST_URL", "") if request_url is None else request_url
         self.cookie_name = cookie_name
+        self.telegram = (os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(), os.environ.get("TELEGRAM_CHAT_ID", "").strip())
         self.max_age = max_age
         if not self.entries:
             _log("[magic-link] ACCESS_TOKEN не задан: доступ закрыт для всех")
@@ -91,11 +98,16 @@ class _Gate:
             action = REQUEST_FORM.substitute(action=html.escape(base + REQUEST_PATH))
         return PAGE.substitute(icon=icon, title=html.escape(title), text=html.escape(text), action=action).encode("utf-8")
 
-    @staticmethod
-    def log_request(body, ip, user_agent):
-        form = dict(parse_qsl(body.decode("utf-8", "replace")))
+    def log_request(self, body, ip, user_agent, host=""):
+        contact = dict(parse_qsl(body.decode("utf-8", "replace"))).get("contact", "")[:200]
         # repr() экранирует переводы строк: пользователь не сможет подделать строки лога.
-        _log("[access-request] contact=%r ip=%s ua=%r" % (form.get("contact", "")[:200], ip, user_agent[:200]))
+        _log("[access-request] contact=%r ip=%s ua=%r" % (contact, ip, user_agent[:200]))
+        token, chat = self.telegram
+        if token and chat:
+            text = "🔑 Запрос доступа к %s\nКонтакт: %s\nIP: %s\n\nВыдать личную ссылку: small access add ИМЯ" % (
+                host or "приложению", contact or "—", ip or "—")
+            # В фоне: пользователь не ждёт Telegram. Без parse_mode — текст из формы ничего не разметит.
+            threading.Thread(target=_send_telegram, args=(token, chat, text), daemon=True).start()
 
     @staticmethod
     def log_login(name, ip):
@@ -119,7 +131,8 @@ class MagicLink:
                 size = min(int(environ.get("CONTENT_LENGTH") or 0), 4096)
             except ValueError:
                 size = 0
-            gate.log_request(environ["wsgi.input"].read(size), ip, environ.get("HTTP_USER_AGENT", ""))
+            gate.log_request(environ["wsgi.input"].read(size), ip, environ.get("HTTP_USER_AGENT", ""),
+                             environ.get("HTTP_HOST", ""))
             return self._page(start_response, "200 OK", gate.page("sent", base))
 
         query = parse_qsl(environ.get("QUERY_STRING", ""), keep_blank_values=True)
@@ -181,7 +194,7 @@ class MagicLinkASGI:
                 body += message.get("body", b"")
                 if not message.get("more_body"):
                     break
-            gate.log_request(body[:4096], ip, headers.get("user-agent", ""))
+            gate.log_request(body[:4096], ip, headers.get("user-agent", ""), headers.get("host", ""))
             return await _asgi_page(send, 200, gate.page("sent", base))
 
         query = parse_qsl(scope.get("query_string", b"").decode("latin-1"), keep_blank_values=True)
@@ -233,6 +246,16 @@ def _client_ip(forwarded, remote):
 
 def _is_https(forwarded_proto, scheme):
     return (forwarded_proto or scheme or "http").split(",")[0].strip() == "https"
+
+
+def _send_telegram(token, chat, text):
+    api = os.environ.get("TELEGRAM_API_URL", "https://api.telegram.org").rstrip("/")
+    request = urllib.request.Request("%s/bot%s/sendMessage" % (api, token), headers={"Content-Type": "application/json"},
+                                     data=json.dumps({"chat_id": chat, "text": text}).encode("utf-8"))
+    try:
+        urllib.request.urlopen(request, timeout=10).close()
+    except Exception as e:  # уведомление — не повод ронять запрос; токен бота в лог не пишем
+        _log("[magic-link] не удалось отправить запрос доступа в Telegram: %s" % type(e).__name__)
 
 
 def _log(message):

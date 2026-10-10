@@ -144,6 +144,39 @@ test('токен на каждого: отзыв одного не задева�
   assert.equal((await fetch(url, { headers: { cookie: aliceCookie } })).status, 200);
 });
 
+test('запрос доступа приходит владельцу в Telegram', async (t) => {
+  const messages = [];
+  const inbox = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => { messages.push({ path: req.url, body: JSON.parse(body) }); res.end('{"ok":true,"result":{}}'); });
+  });
+  await new Promise((resolve) => inbox.listen(0, '127.0.0.1', resolve));
+  t.after(() => inbox.close());
+  const saved = { ...process.env };
+  t.after(() => { for (const k of ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'TELEGRAM_API_URL']) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
+  Object.assign(process.env, { TELEGRAM_BOT_TOKEN: '123:abc', TELEGRAM_CHAT_ID: '42', TELEGRAM_API_URL: `http://127.0.0.1:${inbox.address().port}` });
+  const log = mock.method(console, 'log', () => {});
+  t.after(() => log.mock.restore());
+
+  const s = await serve({ tokens: TOKEN, requestUrl: '' });
+  t.after(() => s.close());
+  const res = await fetch(`http://127.0.0.1:${s.address().port}/_access/request`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-forwarded-for': '203.0.113.7' },
+    body: 'contact=bob%40example.com',
+  });
+  assert.equal(res.status, 200);
+  for (let i = 0; i < 50 && !messages.length; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].path, '/bot123:abc/sendMessage');
+  assert.equal(messages[0].body.chat_id, '42');
+  assert.equal(messages[0].body.parse_mode, undefined);
+  for (const part of ['127.0.0.1', 'bob@example.com', '203.0.113.7', 'small access add']) {
+    assert.ok(messages[0].body.text.includes(part), part);
+  }
+});
+
 test('ACCESS_REQUEST_URL заменяет форму ссылкой', async (t) => {
   const s = await serve({ tokens: TOKEN, requestUrl: 'mailto:owner@example.com?subject=Доступ"' });
   t.after(() => s.close());

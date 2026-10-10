@@ -3,7 +3,13 @@
 import asyncio
 import contextlib
 import io
+import json
+import os
+import socket
+import threading
+import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 from wsgiref.util import setup_testing_defaults
 
@@ -238,6 +244,91 @@ class MagicLinkASGITest(unittest.TestCase):
         bob_cookie = headers["set-cookie"].split(";")[0]
         revoked = MagicLinkASGI(secret_asgi, tokens="alice:tok-a", request_url="")
         self.assertEqual(asgi_call(revoked, cookie=bob_cookie)[0], 403)
+
+
+class TelegramInbox:
+    """Мок Bot API: запоминает sendMessage."""
+
+    def __init__(self):
+        self.messages = []
+        inbox = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                inbox.messages.append((self.path, json.loads(body)))
+                raw = b'{"ok": true, "result": {}}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = "http://127.0.0.1:%d" % self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def wait(self, count=1, seconds=5):
+        deadline = time.monotonic() + seconds
+        while len(self.messages) < count and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return self.messages
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class TelegramTest(unittest.TestCase):
+    """Запрос с кнопки «Запросить доступ» приходит владельцу в Telegram."""
+
+    def setUp(self):
+        self.inbox = TelegramInbox()
+        self.addCleanup(self.inbox.close)
+        patcher = mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "123:abc", "TELEGRAM_CHAT_ID": "42",
+                                               "TELEGRAM_API_URL": self.inbox.url})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def check_message(self):
+        path, body = self.inbox.wait()[0]
+        self.assertEqual(path, "/bot123:abc/sendMessage")
+        self.assertEqual(body["chat_id"], "42")
+        self.assertNotIn("parse_mode", body)  # текст из формы не размечается
+        for part in ("shop.up.railway.app", "bob@example.com", "203.0.113.7", "small access add"):
+            self.assertIn(part, body["text"])
+
+    def test_wsgi(self):
+        app = MagicLink(secret_app, tokens=TOKEN, request_url="")
+        status, _, _, _ = call(app, path="/_access/request", method="POST", body=b"contact=bob%40example.com",
+                               headers={"HTTP_HOST": "shop.up.railway.app", "HTTP_X_FORWARDED_FOR": "203.0.113.7"})
+        self.assertEqual(status, "200 OK")
+        self.check_message()
+
+    def test_asgi(self):
+        app = MagicLinkASGI(secret_asgi, tokens=TOKEN, request_url="")
+        status = asgi_call(app, path="/_access/request", method="POST", body=b"contact=bob%40example.com",
+                           headers={"host": "shop.up.railway.app", "x-forwarded-for": "203.0.113.7"})[0]
+        self.assertEqual(status, 200)
+        self.check_message()
+
+    def test_without_telegram_settings_nothing_is_sent(self):
+        with mock.patch.dict(os.environ, {"TELEGRAM_CHAT_ID": ""}):
+            app = MagicLink(secret_app, tokens=TOKEN, request_url="")
+        call(app, path="/_access/request", method="POST", body=b"contact=x")
+        self.assertEqual(self.inbox.wait(seconds=0.5), [])
+
+    def test_telegram_down_does_not_break_the_request(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            closed = s.getsockname()[1]
+        with mock.patch.dict(os.environ, {"TELEGRAM_API_URL": "http://127.0.0.1:%d" % closed}):
+            app = MagicLink(secret_app, tokens=TOKEN, request_url="")
+            status, _, body, _ = call(app, path="/_access/request", method="POST", body=b"contact=x")
+        self.assertEqual(status, "200 OK")
+        self.assertIn("Запрос отправлен", body)
 
 
 if __name__ == "__main__":

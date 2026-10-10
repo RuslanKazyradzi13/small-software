@@ -11,7 +11,7 @@ import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -29,6 +29,13 @@ DEPLOY_STATUS_RE = re.compile(r"[A-Z_]{1,32}\Z")
 LIVE_TIMEOUT = 5      # секунд на запрос к Railway: кнопка «Обновить» не должна зависать
 LIVE_WORKERS = 8
 LOG_LINES = 200
+LOAD_DAYS = 7
+# Тарифы Railway за месяц (docs.railway.com/reference/pricing/plans) на единицу средней нагрузки из metrics.
+MONTHLY_PRICES_USD = {
+    "CPU_USAGE": 20.0,         # $20 за vCPU, загруженный весь месяц
+    "MEMORY_USAGE_GB": 10.0,   # $10 за ГБ памяти весь месяц
+    "DISK_USAGE_GB": 0.15,     # $0.15 за ГБ тома весь месяц
+}
 
 
 def scan_apps(root, max_depth=MAX_DEPTH):
@@ -50,7 +57,8 @@ def describe_app(folder, root):
     rel = folder.relative_to(root).as_posix()
     app = {"name": folder.name, "path": str(folder), "relPath": "." if rel == "." else rel,
            "status": "not_deployed", "url": None, "railwayUrl": None, "envNames": [], "errors": [],
-           "serviceId": None, "environmentId": None, "deployment": None}
+           "serviceId": None, "environmentId": None, "projectId": None, "deployment": None, "sleep": None,
+           "costUsd": None}
     try:
         config = load_config(folder / CONFIG_FILE)
     except ConfigError as e:
@@ -72,6 +80,8 @@ def describe_app(folder, root):
             app["railwayUrl"] = "https://railway.com/project/%s/service/%s" % (project_id, service_id)
         if _is_id(service_id) and _is_id(state.get("environmentId")):
             app["serviceId"], app["environmentId"] = service_id, state["environmentId"]
+        if _is_id(project_id):
+            app["projectId"] = project_id
         domain = state.get("domain")
         if domain:
             if isinstance(domain, str) and DOMAIN_RE.match(domain):
@@ -100,20 +110,55 @@ def add_live_status(apps, token, timeout=LIVE_TIMEOUT):
 
     def fetch(app):
         try:
-            return app, api.latest_deployment(app["serviceId"], app["environmentId"], timeout=timeout), True
+            return app, api.instance_status(app["serviceId"], app["environmentId"], timeout=timeout), True
         except Exception:  # сеть, таймаут, неверный токен, удалённый сервис, неожиданный ответ
             return app, None, False
 
     answered = False
     with ThreadPoolExecutor(max_workers=min(LIVE_WORKERS, len(linked))) as pool:
-        for app, deployment, ok in pool.map(fetch, linked):
+        for app, instance, ok in pool.map(fetch, linked):
             answered = answered or ok
-            if ok and isinstance(deployment, dict):
+            if not ok or not isinstance(instance, dict):
+                continue
+            app["sleep"] = bool(instance.get("sleep"))
+            deployment = instance.get("deployment")
+            if isinstance(deployment, dict):
                 status = deployment.get("status")
                 if isinstance(status, str) and DEPLOY_STATUS_RE.match(status):
                     created = deployment.get("createdAt")
                     app["deployment"] = {"status": status, "createdAt": created if isinstance(created, str) else None}
     return "on" if answered else "error"
+
+
+def estimate_cost(load):
+    """$ в месяц при средней нагрузке load (ядра, ГБ), по тарифам Railway; без исходящего трафика
+    и бесплатного лимита тарифа ($5 Hobby / $20 Pro)."""
+    return sum(MONTHLY_PRICES_USD[m] * float(v) for m, v in load.items() if m in MONTHLY_PRICES_USD)
+
+
+def add_usage(apps, token, timeout=LIVE_TIMEOUT, days=LOAD_DAYS):
+    """Дописывает app["costUsd"] — оценку $/мес для проекта приложения (с его базами) по средней нагрузке
+    за последние days дней. Ошибки молча оставляют None: это оценка, а не биллинг."""
+    projects = sorted({app["projectId"] for app in apps if app["projectId"]})
+    if not token or not projects:
+        return
+    api = Railway(token)
+    end = datetime.now(timezone.utc).replace(microsecond=0)
+    start = end - timedelta(days=days)
+
+    def fetch(project):
+        try:
+            load = api.average_load(project, start.isoformat().replace("+00:00", "Z"),
+                                    end.isoformat().replace("+00:00", "Z"), timeout=timeout)
+            return project, round(estimate_cost(load), 2)
+        except Exception:
+            return project, None
+
+    with ThreadPoolExecutor(max_workers=min(LIVE_WORKERS, len(projects))) as pool:
+        costs = dict(pool.map(fetch, projects))
+    for app in apps:
+        if app["projectId"]:
+            app["costUsd"] = costs.get(app["projectId"])
 
 
 class DashboardServer(ThreadingHTTPServer):
@@ -161,6 +206,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/apps":
             apps = scan_apps(self.server.root)
             live = add_live_status(apps, self.server.token)
+            if live == "on":
+                add_usage(apps, self.server.token)
             payload = {"root": str(self.server.root),
                        "scannedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
                        "live": live, "apps": apps}
@@ -351,6 +398,12 @@ function card(app) {
   const badge = el("span", "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset " + badgeClass);
   badge.append(el("span", "h-1.5 w-1.5 rounded-full " + dotClass), document.createTextNode(label));
   const badges = el("div", "flex flex-wrap items-center gap-2");
+  if (app.sleep) {
+    const sleep = el("span", "inline-flex items-center rounded-full bg-sky-50 px-2.5 py-0.5 text-xs font-medium text-sky-700 " +
+      "ring-1 ring-inset ring-sky-600/20 dark:bg-sky-950 dark:text-sky-300 dark:ring-sky-400/30", "засыпает");
+    sleep.title = "Режим сна: без запросов приложение засыпает и не тратит ресурсы (small sleep)";
+    badges.append(sleep);
+  }
   if (app.deployment) badges.append(deployBadge(app.deployment));
   badges.append(badge);
   head.append(badges);
@@ -385,6 +438,12 @@ function card(app) {
     li.append(actions);
   }
 
+  if (app.costUsd !== null && app.costUsd !== undefined) {
+    const cost = el("p", "mt-3 text-xs text-stone-500 dark:text-stone-400", "≈ " + usd(app.costUsd) + "/мес при текущей нагрузке");
+    cost.title = "Средняя нагрузка за неделю (CPU, память, тома; вместе с базами) × тарифы Railway. " +
+      "Без трафика и бесплатного лимита тарифа — точная сумма в Railway → Usage";
+    li.append(cost);
+  }
   li.append(el("p", "mt-3 break-all font-mono text-xs text-stone-500 dark:text-stone-400", app.path));
 
   if (app.envNames.length) {
@@ -399,6 +458,10 @@ function card(app) {
     li.append(el("p", "mt-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-300", "⚠ " + error));
   }
   return li;
+}
+
+function usd(value) {
+  return value < 0.01 ? "< $0.01" : "$" + value.toFixed(2);
 }
 
 const BUTTON = "inline-flex items-center rounded-lg border border-stone-300 px-3 py-1.5 text-sm font-medium transition " +
@@ -471,8 +534,10 @@ async function refresh() {
       off: "офлайн-режим: задайте RAILWAY_API_TOKEN для живых статусов",
       error: "Railway не ответил, показаны локальные данные",
     }[data.live] || "";
+    const costs = [...new Map(data.apps.filter((a) => a.costUsd != null).map((a) => [a.projectId, a.costUsd])).values()];
+    const total = costs.length ? " · ≈ " + usd(costs.reduce((x, y) => x + y, 0)) + "/мес" : "";
     $("summary").textContent = (n
-      ? `${n} ${plural(n, "приложение", "приложения", "приложений")} · ${linked} привязано к Railway · обновлено в ${time}`
+      ? `${n} ${plural(n, "приложение", "приложения", "приложений")} · ${linked} привязано к Railway${total} · обновлено в ${time}`
       : `Обновлено в ${time}`) + (linked && live ? " · " + live : "");
   } catch (e) {
     $("error").textContent = "Не удалось получить список: " + e.message + ". Запущен ли small dashboard?";

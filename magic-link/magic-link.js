@@ -17,6 +17,9 @@
  *                       у остальных всё работает. Не задан — доступ закрыт для всех.
  *   ACCESS_REQUEST_URL  куда ведёт кнопка (mailto:..., https://t.me/...). Не задан — кнопка отправляет
  *                       форму в само приложение, и запрос печатается в лог строкой [access-request]
+ *   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+ *                       если заданы, запрос из формы ещё и приходит владельцу в Telegram
+ *                       (подключить: small notify telegram)
  */
 
 const crypto = require('node:crypto');
@@ -38,6 +41,8 @@ function magicLink(options = {}) {
   const requestUrl = options.requestUrl ?? process.env.ACCESS_REQUEST_URL ?? '';
   const cookieName = options.cookieName ?? COOKIE_NAME;
   const maxAge = options.maxAge ?? COOKIE_MAX_AGE;
+  const telegramToken = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
+  const telegramChat = String(process.env.TELEGRAM_CHAT_ID || '').trim();
   if (!entries.length) console.log('[magic-link] ACCESS_TOKEN не задан: доступ закрыт для всех');
 
   function page(req, res, status, kind) {
@@ -60,14 +65,28 @@ function magicLink(options = {}) {
   function accessRequest(req, res) {
     const done = (contact) => {
       const forwarded = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '');
-      // JSON.stringify экранирует переводы строк: пользователь не сможет подделать строки лога.
-      console.log('[access-request] ' + JSON.stringify({
+      const entry = {
         contact: String(contact || '').slice(0, 200),
         ip: forwarded.split(',')[0].trim(),
         ua: String(req.headers['user-agent'] || '').slice(0, 200),
-      }));
+      };
+      // JSON.stringify экранирует переводы строк: пользователь не сможет подделать строки лога.
+      console.log('[access-request] ' + JSON.stringify(entry));
+      if (telegramToken && telegramChat) notifyTelegram(req.headers.host, entry);
       page(req, res, 200, 'sent');
     };
+
+    // Без await: пользователь не ждёт Telegram. Без parse_mode — текст из формы ничего не разметит.
+    function notifyTelegram(host, entry) {
+      const api = String(process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/+$/, '');
+      const text = `🔑 Запрос доступа к ${host || 'приложению'}\nКонтакт: ${entry.contact || '—'}\nIP: ${entry.ip || '—'}`
+        + '\n\nВыдать личную ссылку: small access add ИМЯ';
+      fetch(`${api}/bot${telegramToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: telegramChat, text }),
+      }).catch((e) => console.log('[magic-link] не удалось отправить запрос доступа в Telegram: ' + e.name));
+    }
     // Если тело уже разобрал express.urlencoded(), поток прочитан — берём готовое значение.
     if (req.body !== undefined || req.readableEnded) return done(req.body && req.body.contact);
     let body = '';

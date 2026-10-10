@@ -21,12 +21,15 @@
 3. Дальше доступ даёт кука. Без неё или с неверным токеном отдаётся **403** с кнопкой «Запросить доступ».
 4. Кнопка ведёт на `ACCESS_REQUEST_URL`, если он задан (`mailto:`, Telegram, Google Form). Если не задан, кнопка
    открывает форму «Email или Telegram для ответа». Запрос печатается в лог приложения строкой `[access-request] ...`:
-   в Railway её видно в Deploy Logs, поиск по `access-request`.
+   в Railway её видно в Deploy Logs, поиск по `access-request`. Если заданы `TELEGRAM_BOT_TOKEN` и
+   `TELEGRAM_CHAT_ID`, запрос дополнительно приходит в Telegram: адрес приложения, контакт и IP. Отправка идёт в
+   фоне, без разметки текста; если Telegram недоступен, пользователь всё равно видит «Запрос отправлен».
 
 | Переменная | Значение |
 |---|---|
 | `ACCESS_TOKEN` | токены через запятую; у токена может быть имя: `alice:токен1,bob:токен2`. **Не задан — доступ закрыт для всех.** |
 | `ACCESS_REQUEST_URL` | необязательно: куда ведёт кнопка «Запросить доступ» |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | необязательно: запросы из формы ещё и приходят владельцу в Telegram (настроить: `small notify telegram`) |
 
 ### Токен на каждого человека
 
@@ -109,8 +112,8 @@ http.createServer((req, res) => guard(req, res, () => handler(req, res)));
 ## Тесты
 
 ```bash
-python -m unittest test_magic_link     # 20: WSGI, ASGI, личные токены
-node --test                            # 12
+python -m unittest test_magic_link     # 24: WSGI, ASGI, личные токены, Telegram
+node --test                            # 13
 ```
 
 Проверяются:
@@ -123,4 +126,5 @@ node --test                            # 12
 - журнал запросов доступа без инъекции строк;
 - режим `ACCESS_REQUEST_URL`;
 - личные токены: отзыв одного не задевает остальных;
+- пересылка запросов в Telegram и работа при недоступном Telegram;
 - для ASGI ещё websocket и lifespan.

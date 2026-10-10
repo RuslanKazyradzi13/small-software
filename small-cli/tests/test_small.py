@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -27,7 +28,7 @@ from urllib.parse import parse_qs, urlparse
 from small_cli.archive import IgnoreRules
 from small_cli.cli import main
 from small_cli.config import load_config
-from small_cli.dashboard import DashboardServer, add_live_status, scan_apps, start_server
+from small_cli.dashboard import DashboardServer, add_live_status, add_usage, scan_apps, start_server
 from small_cli.scaffold import TEMPLATES_DIR
 
 TOKEN = "test-token"
@@ -37,8 +38,12 @@ class MockRailway:
     """Имитирует нужную часть backboard.railway.com: /graphql/v2 и /project/.../up."""
 
     def __init__(self, final_status="SUCCESS", workspaces=None, domain_free=True, projects=None, domain=None,
-                 live=None, delay=0, service_vars=None, project=None, logs=None):
+                 live=None, delay=0, service_vars=None, project=None, logs=None, metrics=None, workflow="Complete"):
         self.final_status = final_status
+        self.sleep = {}            # serviceId -> режим сна
+        self.metrics = metrics or {}  # projectId -> [(MEASUREMENT, [(часов до конца периода, значение), ...])]
+        self.workflow = workflow   # статус workflowStatus для развёртывания шаблона
+        self.custom_domains = []
         self.service_vars = service_vars or {}  # переменные сервиса в Railway
         self.project = project  # {"name", "services": [{"id", "name"}]} для project(id); None — «не найден»
         failure = [("2026-10-10T12:00:00Z", "ERROR: No matching distribution for flask==99")]
@@ -108,7 +113,43 @@ class MockRailway:
             if status is None:
                 return {"errors": [{"message": "ServiceInstance not found"}]}
             latest = {"id": "dep-live", "status": status, "createdAt": "2026-10-10T12:00:00Z"} if status else None
-            return {"data": {"serviceInstance": {"latestDeployment": latest}}}
+            return {"data": {"serviceInstance": {"latestDeployment": latest,
+                                                 "sleepApplication": self.sleep.get(variables["serviceId"], False)}}}
+        if field == "serviceInstanceUpdate":
+            if "sleepApplication" in variables["input"]:
+                self.sleep[variables["s"]] = variables["input"]["sleepApplication"]
+            return {"data": {"serviceInstanceUpdate": True}}
+        if field == "metrics":
+            end = datetime.fromisoformat(variables["end"].replace("Z", "+00:00")).timestamp()
+            series = [{"measurement": m, "values": [{"ts": int(end - hours * 3600), "value": v} for hours, v in points]}
+                      for m, points in self.metrics.get(variables["p"], [])]
+            return {"data": {"metrics": series}}
+        if field == "template":
+            config = {"services": {"tpl-svc": {"name": "Postgres", "variables": {
+                "DATABASE_URL": {"defaultValue": "postgresql://u:${{POSTGRES_PASSWORD}}@db:5432/railway"},
+                "SSL_CERT_DAYS": {"defaultValue": "", "isOptional": True}}}}}
+            return {"data": {"template": {"id": "tpl-pg", "name": "PostgreSQL", "serializedConfig": config}}}
+        if field == "templateDeployV2":
+            if self.project is not None:
+                self.project["services"].append({"id": "svc-pg", "name": "Postgres"})
+            return {"data": {"templateDeployV2": {"projectId": variables["input"]["projectId"], "workflowId": "wf-1"}}}
+        if field == "workflowStatus":
+            return {"data": {"workflowStatus": {"status": self.workflow,
+                                                "error": "boom" if self.workflow == "Error" else None}}}
+        if field == "customDomainCreate":
+            item = {"id": "cd-%d" % (len(self.custom_domains) + 1), "domain": variables["input"]["domain"],
+                    "targetPort": variables["input"].get("targetPort"), "status": {
+                        "dnsRecords": [{"recordType": "DNS_RECORD_TYPE_CNAME", "hostlabel": "app",
+                                        "fqdn": variables["input"]["domain"], "requiredValue": "abc123.up.railway.app",
+                                        "currentValue": "", "status": "DNS_RECORD_STATUS_REQUIRES_UPDATE",
+                                        "purpose": "DNS_RECORD_PURPOSE_TRAFFIC_ROUTE"}],
+                        "verified": False, "verificationDnsHost": "_railway-verify.app",
+                        "verificationToken": "railway-verify=xyz", "certificateStatus": "CERTIFICATE_STATUS_TYPE_VALIDATING_OWNERSHIP"}}
+            self.custom_domains.append(item)
+            return {"data": {"customDomainCreate": item}}
+        if field == "customDomainDelete":
+            self.custom_domains = [d for d in self.custom_domains if d["id"] != variables["id"]]
+            return {"data": {"customDomainDelete": True}}
         if field == "projects":
             return {"data": {"projects": {"edges": [{"node": p} for p in self.projects]}}}
         if field == "variableCollectionUpsert":
@@ -135,7 +176,7 @@ class MockRailway:
             return {"data": {"serviceDomainUpdate": True}}
         if field == "domains":
             domains = [{"id": "dom-1", "domain": self.domain}] if self.domain else []
-            return {"data": {"domains": {"serviceDomains": domains}}}
+            return {"data": {"domains": {"serviceDomains": domains, "customDomains": self.custom_domains}}}
         if field == "deployment":
             status = self.statuses.pop(0) if self.statuses else self.final_status
             return {"data": {"deployment": {"status": status}}}
@@ -660,7 +701,8 @@ class DashboardTest(unittest.TestCase):
             "status": "linked", "url": "https://billing-x1.up.railway.app",
             "railwayUrl": "https://railway.com/project/proj-1/service/svc-1",
             "envNames": ["ACCESS_TOKEN", "DEBUG"], "errors": [],
-            "serviceId": "svc-1", "environmentId": "env-1", "deployment": None})
+            "serviceId": "svc-1", "environmentId": "env-1", "projectId": "proj-1", "deployment": None,
+            "sleep": None, "costUsd": None})
         self.assertEqual((apps["fresh"]["name"], apps["fresh"]["status"], apps["fresh"]["url"]),
                          ("fresh-app", "not_deployed", None))
         self.assertEqual((apps["legacy"]["name"], apps["legacy"]["status"], apps["legacy"]["url"]),
@@ -1419,6 +1461,253 @@ class FastAPITemplateTest(unittest.TestCase):
         log = Path(log_path).read_text(encoding="utf-8", errors="replace")
         self.assertIn("token=***", log)
         self.assertNotIn(self.token, log)
+
+
+class MockTelegram:
+    """Bot API: getMe, getUpdates, sendMessage. Принимает только токен BOT."""
+
+    BOT = "123456:test-bot-token"
+
+    def __init__(self, updates=None):
+        self.updates = list(updates or [])
+        self.sent = []
+        mock_server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                m = re.fullmatch(r"/bot([^/]+)/(\w+)", self.path)
+                if not m or m.group(1) != MockTelegram.BOT:
+                    return self._send(401, {"ok": False, "description": "Unauthorized"})
+                method = m.group(2)
+                if method == "getMe":
+                    return self._send(200, {"ok": True, "result": {"id": 1, "username": "small_test_bot"}})
+                if method == "getUpdates":
+                    return self._send(200, {"ok": True, "result": mock_server.updates})
+                if method == "sendMessage":
+                    mock_server.sent.append(body)
+                    return self._send(200, {"ok": True, "result": {"message_id": len(mock_server.sent)}})
+                self._send(404, {"ok": False, "description": "Not Found"})
+
+            def _send(self, code, payload):
+                raw = json.dumps(payload).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = "http://127.0.0.1:%d" % self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class PlatformCommandsTest(unittest.TestCase):
+    """small sleep, db, domain, notify на моках Railway и Telegram."""
+
+    STATE = {"name": "demo", "projectId": "proj-1", "environmentId": "env-1", "serviceId": "svc-1",
+             "domain": "demo.up.railway.app"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = self.tmp.name
+        write(self.app, "small.json", json.dumps({"name": "demo", "env": {"ACCESS_TOKEN": "tok-owner"}}))
+        write(self.app, ".small.json", json.dumps(self.STATE))
+
+    def railway(self, **kwargs):
+        kwargs.setdefault("project", {"name": "demo", "services": [{"id": "svc-1", "name": "demo"}]})
+        kwargs.setdefault("live", {"svc-1": "SUCCESS", "svc-pg": "SUCCESS"})
+        server = MockRailway(**kwargs)
+        self.addCleanup(server.close)
+        return server
+
+    def cli(self, server, *args, env=None):
+        full = {"RAILWAY_API_TOKEN": TOKEN, "SMALL_API_URL": server.url} if server else {}
+        full.update(env or {})
+        where = [self.app] if args[0] == "destroy" else ["-C", self.app]
+        return run([args[0], *where, *args[1:]], full)
+
+    def state(self):
+        return json.loads(Path(self.app, ".small.json").read_text(encoding="utf-8"))
+
+    def config(self):
+        return json.loads(Path(self.app, "small.json").read_text(encoding="utf-8"))
+
+    # --- sleep ---
+
+    def test_sleep_on_off_and_status(self):
+        server = self.railway()
+        code, out, err = self.cli(server, "sleep")
+        self.assertEqual((code, out.strip()), (0, "off"), err)
+        code, _, err = self.cli(server, "sleep", "on")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(server.variables["serviceInstanceUpdate"],
+                         {"s": "svc-1", "e": "env-1", "input": {"sleepApplication": True}})
+        self.assertEqual(server.calls[-1], "serviceInstanceRedeploy")
+        self.assertIn("просыпается", err)
+        self.assertEqual(self.cli(server, "sleep")[1].strip(), "on")
+        server.calls.clear()
+        code, _, err = self.cli(server, "sleep", "on")  # уже включён — ничего не делаем
+        self.assertIn("уже включён", err)
+        self.assertNotIn("serviceInstanceUpdate", server.calls)
+        code, _, err = self.cli(server, "sleep", "off", "--no-deploy")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("serviceInstanceRedeploy", server.calls)
+        self.assertFalse(server.sleep["svc-1"])
+
+    # --- db ---
+
+    def test_db_add_list_remove(self):
+        server = self.railway()
+        code, _, err = self.cli(server, "db", "add", "postgres")
+        self.assertEqual(code, 0, err)
+        deployed = server.variables["templateDeployV2"]["input"]
+        self.assertEqual((deployed["projectId"], deployed["environmentId"], deployed["templateId"]),
+                         ("proj-1", "env-1", "tpl-pg"))
+        variables = deployed["serializedConfig"]["services"]["tpl-svc"]["variables"]
+        self.assertEqual(variables["DATABASE_URL"]["value"], variables["DATABASE_URL"]["defaultValue"])
+        self.assertNotIn("value", variables["SSL_CERT_DAYS"])  # пустое значение по умолчанию не подставляем
+        self.assertEqual(self.state()["databases"], [{"type": "postgres", "serviceId": "svc-pg", "name": "Postgres"}])
+        self.assertEqual(self.config()["env"]["DATABASE_URL"], "${{Postgres.DATABASE_URL}}")
+        self.assertEqual(server.service_vars["DATABASE_URL"], "${{Postgres.DATABASE_URL}}")
+        self.assertEqual(server.calls[-1], "serviceInstanceRedeploy")
+
+        code, out, _ = self.cli(server, "db")
+        self.assertEqual(out.split(), ["postgres", "Postgres", "SUCCESS"])
+        self.assertEqual(self.cli(server, "db", "add", "postgres")[0], 1)  # уже есть
+
+        self.assertEqual(self.cli(server, "db", "remove", "postgres")[0], 1)  # без --yes и терминала — нельзя
+        code, _, err = self.cli(server, "db", "remove", "postgres", "--yes")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(server.variables["serviceDelete"], {"id": "svc-pg"})
+        self.assertEqual(self.state()["databases"], [])
+        self.assertNotIn("DATABASE_URL", self.config()["env"])
+
+    def test_db_add_reports_failed_template(self):
+        server = self.railway(workflow="Error")
+        code, _, err = self.cli(server, "db", "add", "postgres")
+        self.assertEqual(code, 1)
+        self.assertIn("boom", err)
+        self.assertNotIn("databases", self.state())
+
+    def test_destroy_removes_app_together_with_its_database(self):
+        server = self.railway(project={"name": "demo", "services": [{"id": "svc-1", "name": "demo"},
+                                                                    {"id": "svc-pg", "name": "Postgres"}]})
+        write(self.app, ".small.json", json.dumps(dict(self.STATE, databases=[
+            {"type": "postgres", "serviceId": "svc-pg", "name": "Postgres"}])))
+        code, _, err = self.cli(server, "destroy", "--yes")
+        self.assertEqual(code, 0, err)
+        self.assertIn("projectDelete", server.calls)  # база — часть приложения, проект удаляется целиком
+        self.assertNotIn("serviceDelete", server.calls)
+
+    # --- domain ---
+
+    def test_domain_add_list_remove(self):
+        server = self.railway()
+        code, out, err = self.cli(server, "domain", "add", "https://App.Example.com/")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(server.variables["customDomainCreate"]["input"]["domain"], "app.example.com")
+        rows = [line.split() for line in out.strip().splitlines()]
+        self.assertEqual(rows, [["CNAME", "app.example.com", "abc123.up.railway.app"],
+                                ["TXT", "_railway-verify.app", "railway-verify=xyz"]])
+        code, out, _ = self.cli(server, "domain")
+        self.assertIn("app.example.com", out)
+        self.assertIn("ждёт DNS-записей", out)
+        self.assertEqual(self.cli(server, "domain", "add", "app.example.com")[0], 1)  # уже есть
+        self.assertEqual(self.cli(server, "domain", "add", "not a domain")[0], 1)
+        code, _, err = self.cli(server, "domain", "remove", "app.example.com")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(server.custom_domains, [])
+        self.assertEqual(self.cli(server, "domain", "remove", "app.example.com")[0], 1)
+
+    # --- notify ---
+
+    def test_notify_telegram_finds_chat_and_sets_variables(self):
+        server = self.railway()
+        telegram = MockTelegram(updates=[{"update_id": 7, "message": {"chat": {"id": 4242, "first_name": "Ruslan"}}}])
+        self.addCleanup(telegram.close)
+        tg_env = {"TELEGRAM_BOT_TOKEN": MockTelegram.BOT, "TELEGRAM_API_URL": telegram.url}
+        code, _, err = self.cli(server, "notify", "telegram", env=tg_env)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(telegram.sent[0]["chat_id"], 4242)
+        self.assertIn("demo", telegram.sent[0]["text"])
+        self.assertIn("@small_test_bot → Ruslan", err)
+        self.assertEqual(self.config()["env"]["TELEGRAM_CHAT_ID"], "4242")
+        self.assertEqual(server.service_vars["TELEGRAM_BOT_TOKEN"], MockTelegram.BOT)
+        self.assertNotIn(MockTelegram.BOT, err)  # токен бота не печатается
+        self.assertEqual(self.cli(None, "notify")[1].strip(), "telegram")
+
+        code, _, err = self.cli(server, "notify", "off")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", self.config()["env"])
+        self.assertNotIn("TELEGRAM_CHAT_ID", server.service_vars)
+
+    def test_notify_telegram_errors(self):
+        telegram = MockTelegram()
+        self.addCleanup(telegram.close)
+        code, _, err = self.cli(None, "notify", "telegram", env={"TELEGRAM_BOT_TOKEN": "wrong",
+                                                                 "TELEGRAM_API_URL": telegram.url})
+        self.assertEqual(code, 1)
+        self.assertIn("Unauthorized", err)
+        code, _, err = self.cli(None, "notify", "telegram", "--wait", "0",
+                                env={"TELEGRAM_BOT_TOKEN": MockTelegram.BOT, "TELEGRAM_API_URL": telegram.url})
+        self.assertEqual(code, 1)
+        self.assertIn("@small_test_bot", err)  # никто не написал боту
+        with mock.patch.object(sys, "stdin") as stdin:  # нет токена и нет терминала (иначе getpass ждал бы ввода)
+            stdin.isatty.return_value = False
+            code, _, err = run(["notify", "-C", self.app, "telegram"], {})
+        self.assertEqual(code, 1)
+        self.assertIn("TELEGRAM_BOT_TOKEN", err)
+
+
+class DashboardUsageTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+        write(self.root, "shop/.small.json", json.dumps({"name": "shop", "projectId": "proj-1",
+                                                          "environmentId": "env-1", "serviceId": "svc-1"}))
+        write(self.root, "draft/small.json", '{"name": "draft"}')
+
+    def test_monthly_cost_from_average_load(self):
+        from small_cli.dashboard import estimate_cost
+        self.assertAlmostEqual(estimate_cost({"CPU_USAGE": 0.5, "MEMORY_USAGE_GB": 1.0}), 20.0)  # $10 + $10
+        self.assertAlmostEqual(estimate_cost({"DISK_USAGE_GB": 2.0, "UNKNOWN": 99}), 0.3)
+
+    def test_api_has_sleep_and_cost(self):
+        # CPU: приложение создано 23 ч назад, всё время 0.1 ядра → среднее 0.1 (не занижаем новые приложения).
+        # Память: первый замер 9 ч назад, потом 5 замеров по 0.2 ГБ, в остальные часы спало → среднее 0.1.
+        railway = MockRailway(live={"svc-1": "SLEEPING"}, metrics={"proj-1": [
+            ("CPU_USAGE", [(h, 0.1) for h in range(24)]),
+            ("MEMORY_USAGE_GB", [(9, 0.2), (8, 0.2), (3, 0.2), (2, 0.2), (0, 0.2)])]})
+        railway.sleep["svc-1"] = True
+        self.addCleanup(railway.close)
+        with mock.patch.dict(os.environ, {"SMALL_API_URL": railway.url}):
+            apps = scan_apps(self.root)
+            add_live_status(apps, TOKEN)
+            add_usage(apps, TOKEN)
+        shop = next(a for a in apps if a["name"] == "shop")
+        self.assertEqual((shop["sleep"], shop["deployment"]["status"]), (True, "SLEEPING"))
+        self.assertAlmostEqual(shop["costUsd"], 3.0)  # 0.1 ядра × $20 + 0.1 ГБ × $10
+        draft = next(a for a in apps if a["name"] == "draft")
+        self.assertEqual((draft["sleep"], draft["costUsd"]), (None, None))
+        start = datetime.fromisoformat(railway.variables["metrics"]["start"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(railway.variables["metrics"]["end"].replace("Z", "+00:00"))
+        self.assertEqual(((end - start).days, railway.variables["metrics"]["step"]), (7, 3600))
+
+    def test_usage_errors_leave_cost_empty(self):
+        with mock.patch.dict(os.environ, {"SMALL_API_URL": "http://127.0.0.1:%d" % closed_port()}):
+            apps = scan_apps(self.root)
+            add_usage(apps, TOKEN, timeout=1)
+        self.assertEqual({a["costUsd"] for a in apps}, {None})
 
 
 class LauncherTest(unittest.TestCase):
