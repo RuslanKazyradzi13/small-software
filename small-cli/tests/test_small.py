@@ -26,6 +26,7 @@ from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 from small_cli.archive import IgnoreRules
+from small_cli import cli
 from small_cli.cli import main
 from small_cli.config import load_config
 from small_cli.dashboard import DashboardServer, add_live_status, add_usage, scan_apps, start_server
@@ -45,6 +46,7 @@ class MockRailway:
         self.workflow = workflow   # статус workflowStatus для развёртывания шаблона
         self.custom_domains = []
         self.service_vars = service_vars or {}  # переменные сервиса в Railway
+        self.rendered = {}  # имя → значение после подстановки ссылок ${{...}}
         self.project = project  # {"name", "services": [{"id", "name"}]} для project(id); None — «не найден»
         failure = [("2026-10-10T12:00:00Z", "ERROR: No matching distribution for flask==99")]
         self.logs = logs or {"buildLogs": failure, "deploymentLogs": failure}  # поле -> [(timestamp, message)]
@@ -186,7 +188,10 @@ class MockRailway:
             lines = lines[-(variables.get("limit") or len(lines) or 1):]
             return {"data": {field: [{"timestamp": ts, "message": msg, "severity": "info"} for ts, msg in lines]}}
         if field == "variables":
-            return {"data": {"variables": self.service_vars}}
+            if variables.get("unrendered"):
+                return {"data": {"variables": self.service_vars}}
+            # Как Railway: ссылки ${{Сервис.ПЕРЕМЕННАЯ}} отдаются уже подставленными.
+            return {"data": {"variables": {k: self.rendered.get(k, v) for k, v in self.service_vars.items()}}}
         if field == "project":
             if self.project is None:
                 return {"errors": [{"message": "Project not found"}]}
@@ -251,9 +256,10 @@ class DeployTest(unittest.TestCase):
 
         self.assertEqual(code, 0, err)
         self.assertEqual(out.strip(), "https://demo-app.up.railway.app")
-        self.assertEqual(server.calls, ["me", "projects", "projectCreate", "serviceCreate", "UPLOAD",
+        # Домен — до загрузки кода: его адрес нужен уже первой сборке.
+        self.assertEqual(server.calls, ["me", "projects", "projectCreate", "serviceCreate",
                                         "serviceDomainCreate", "serviceDomainAvailable", "serviceDomainUpdate",
-                                        "domains", "deployment", "deployment", "deployment", "deployment"])
+                                        "domains", "UPLOAD", "deployment", "deployment", "deployment", "deployment"])
         self.assertEqual(server.variables["projectCreate"]["input"], {"name": "demo-app", "workspaceId": "ws-1"})
         self.assertEqual(server.uploads, [["./.gitignore", "./app.py", "./keep.log",
                                            "./lib/util.py", "./requirements.txt"]])
@@ -419,6 +425,28 @@ class ConfigFileTest(unittest.TestCase):
         self.assertNotIn("projectCreate", server.calls)
         self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"], {"DEBUG": "false"})
         self.assertLess(server.calls.index("variableCollectionUpsert"), server.calls.index("UPLOAD"))
+
+    def test_email_login_gets_public_url_of_the_final_domain(self):
+        # Railway после переименования домена оставляет в RAILWAY_PUBLIC_DOMAIN старый адрес — small передаёт свой.
+        self.write_config({"name": "my-custom-app-name", "env": {"ACCESS_EMAILS": "ivan@company.com", "SESSION_SECRET": "s"}})
+        server = self.server()
+        code, _, err = self.deploy(server)
+        self.assertEqual(code, 0, err)
+        sent = server.variables["variableCollectionUpsert"]["input"]["variables"]
+        self.assertEqual(sent["PUBLIC_URL"], "https://my-custom-app-name.up.railway.app")
+        self.assertLess(server.calls.index("serviceDomainUpdate"), server.calls.index("variableCollectionUpsert"))
+        self.assertNotIn("PUBLIC_URL", json.loads(Path(self.app, "small.json").read_text(encoding="utf-8-sig"))["env"])
+        self.assertIn("PUBLIC_URL", err)
+
+        self.write_config({"name": "my-custom-app-name",
+                           "env": {"ACCESS_EMAILS": "ivan@company.com", "PUBLIC_URL": "https://reports.company.com"}})
+        self.assertEqual(self.deploy(server)[0], 0)
+        sent = server.variables["variableCollectionUpsert"]["input"]["variables"]
+        self.assertEqual(sent["PUBLIC_URL"], "https://reports.company.com")  # свой адрес владельца не трогаем
+
+        self.write_config({"name": "my-custom-app-name", "env": {"DEBUG": "1"}})
+        self.assertEqual(self.deploy(server)[0], 0)
+        self.assertNotIn("PUBLIC_URL", server.variables["variableCollectionUpsert"]["input"]["variables"])
 
     def test_binds_to_existing_project_with_same_name(self):
         self.write_config(self.CONFIG)
@@ -1238,6 +1266,20 @@ class EnvAndAccessTest(unittest.TestCase):
         code, out, _ = self.cli(self.railway(), "env", "list", "--values")
         self.assertIn("zzz", out)
 
+    def test_env_list_compares_references_not_rendered_values(self):
+        # После small db add: в small.json и Railway записана ссылка, Railway подставляет в неё адрес с паролем.
+        reference = "${{Postgres.DATABASE_URL}}"
+        self.config({"name": "demo", "env": {"ACCESS_TOKEN": "tok-owner", "DATABASE_URL": reference}})
+        server = self.railway(DATABASE_URL=reference)
+        server.rendered["DATABASE_URL"] = "postgresql://postgres:s3cret@postgres.railway.internal:5432/railway"
+        code, out, err = self.cli(server, "env", "list", "--values")
+        self.assertEqual(code, 0, err)
+        row = next(line for line in out.splitlines() if line.startswith("DATABASE_URL"))
+        self.assertIn("small.json + Railway", row)
+        self.assertIn(reference, row)
+        self.assertNotIn("s3cret", out)
+        self.assertTrue(server.variables["variables"]["unrendered"])
+
     def test_env_set_updates_railway_and_config_then_redeploys(self):
         server = self.railway()
         code, _, err = self.cli(server, "env", "set", "NEW=hello world", "DIFF=fixed")
@@ -1313,7 +1355,7 @@ class EnvAndAccessTest(unittest.TestCase):
         server = self.railway(ACCESS_TOKEN="alice:tok-a")
         code, _, err = self.cli(server, "access", "revoke", "alice")
         self.assertEqual(code, 0, err)
-        self.assertIn("закрыто для всех", err)
+        self.assertIn("не сможет никто", err)
         self.assertNotIn("ACCESS_TOKEN", self.config()["env"])
         self.assertIn("variableDelete", server.calls)
 
@@ -1324,6 +1366,170 @@ class EnvAndAccessTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertRegex(self.config()["env"]["ACCESS_TOKEN"], r"^from-railway,carol:")
         self.assertNotIn("serviceInstanceRedeploy", server.calls)
+
+    # --- вход по почте и small mail ---
+
+    def mail(self, server, *args, env=None):
+        return run(["mail", "-C", self.app, *args], dict({"SMALL_API_URL": server.url, "RAILWAY_API_TOKEN": TOKEN},
+                                                         **(env or {})))
+
+    def test_access_by_email_and_domain(self):
+        write(self.app, "magic_link.py", "# понимает ACCESS_EMAILS\n")
+        server = self.railway()
+        code, out, err = self.cli(server, "access", "add", "Ivan@Company.com")
+        self.assertEqual(code, 0, err)
+        env = self.config()["env"]
+        self.assertEqual(env["ACCESS_EMAILS"], "ivan@company.com")
+        self.assertRegex(env["SESSION_SECRET"], r"^[A-Za-z0-9_-]{40,}$")
+        self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"],
+                         {"ACCESS_EMAILS": "ivan@company.com", "SESSION_SECRET": env["SESSION_SECRET"],
+                          "PUBLIC_URL": "https://demo.up.railway.app"})  # адрес для ссылок в письмах
+        self.assertNotIn("PUBLIC_URL", env)  # его small ведёт сам, в small.json не пишет
+        self.assertEqual(out, "")  # никаких ссылок-паролей: человек входит своей почтой
+        self.assertIn("https://demo.up.railway.app/", err)
+        self.assertIn("small mail resend", err)  # почта ещё не настроена
+
+        code, _, err = self.cli(server, "access", "add", "@team.com")
+        self.assertEqual(code, 0, err)
+        env2 = self.config()["env"]
+        self.assertEqual(env2["ACCESS_EMAILS"], "ivan@company.com, @team.com")
+        self.assertEqual(env2["SESSION_SECRET"], env["SESSION_SECRET"])  # ключ прежний — входы не сбрасываются
+        self.assertEqual(self.cli(server, "access", "add", "IVAN@company.com")[0], 1)  # уже есть
+
+        code, out, _ = self.cli(server, "access")
+        self.assertIn("ivan@company.com", out)
+        self.assertIn("@team.com  (весь домен)", out)
+        self.assertIn("(общая ссылка)", out)  # ссылка владельца тоже на месте
+
+        code, _, err = self.cli(server, "access", "revoke", "IVAN@company.com")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.config()["env"]["ACCESS_EMAILS"], "@team.com")
+        self.assertIn("даже в открытом браузере", err)
+        self.assertEqual(self.cli(server, "access", "revoke", "nobody@company.com")[0], 1)
+        self.assertEqual(self.cli(server, "access", "revoke", "@team.com")[0], 0)
+        self.assertNotIn("ACCESS_EMAILS", self.config()["env"])
+        self.assertIn("SESSION_SECRET", self.config()["env"])
+
+    def test_access_by_email_needs_a_template_that_supports_it(self):
+        write(self.app, "magic_link.py", "# старая версия\n")
+        code, _, err = self.cli(self.railway(), "access", "add", "ivan@company.com")
+        self.assertEqual(code, 1)
+        self.assertIn("старой версии", err)
+        self.assertIn(os.path.join("python-http", "magic_link.py"), err)
+        os.remove(os.path.join(self.app, "magic_link.py"))
+        write(self.app, "app.py", "import streamlit as st\n")
+        code, _, err = self.cli(self.railway(), "access", "add", "ivan@company.com")
+        self.assertEqual(code, 1)
+        self.assertIn("streamlit", err)
+        self.assertNotIn("ACCESS_EMAILS", self.config()["env"])
+
+    def test_mail_resend_sends_a_test_letter_before_saving(self):
+        resend = MockResend()
+        self.addCleanup(resend.close)
+        server = self.railway(LOGIN_LINKS_TO_LOG="1")
+        code, _, err = self.mail(server, "resend", "--to", "ivan@company.com", "--from", "Отчёты <noreply@company.com>",
+                                 env={"RESEND_API_KEY": "re_test_key", "RESEND_API_URL": resend.url})
+        self.assertEqual(code, 0, err)
+        path, headers, body = resend.requests[0]
+        self.assertEqual((path, headers["Authorization"]), ("/emails", "Bearer re_test_key"))
+        self.assertEqual((body["to"], body["from"]), (["ivan@company.com"], "Отчёты <noreply@company.com>"))
+        env = self.config()["env"]
+        self.assertEqual((env["RESEND_API_KEY"], env["MAIL_FROM"]), ("re_test_key", "Отчёты <noreply@company.com>"))
+        deleted = [v["input"]["name"] for c, v in zip(server.calls, server.history) if c == "variableDelete"]
+        self.assertEqual(deleted, ["LOGIN_LINKS_TO_LOG"])  # режим проверки выключен
+        self.assertNotIn("re_test_key", err)
+        self.assertEqual(self.mail(server)[1].strip(), "resend")
+
+    def test_mail_resend_failure_saves_nothing(self):
+        resend = MockResend(status=403)
+        self.addCleanup(resend.close)
+        server = self.railway()
+        before = self.config()
+        code, _, err = self.mail(server, "resend", "--to", "ivan@company.com",
+                                 env={"RESEND_API_KEY": "re_bad_key", "RESEND_API_URL": resend.url})
+        self.assertEqual(code, 1)
+        self.assertIn("пробное письмо не ушло: HTTP 403", err)
+        self.assertIn("подтвердите домен", err)
+        self.assertNotIn("re_bad_key", err)
+        self.assertEqual(self.config(), before)
+        self.assertNotIn("variableCollectionUpsert", server.calls)
+        with mock.patch.object(sys, "stdin") as stdin:  # нет ключа и нет терминала
+            stdin.isatty.return_value = False
+            code, _, err = self.mail(server, "resend", "--to", "ivan@company.com")
+        self.assertEqual(code, 1)
+        self.assertIn("RESEND_API_KEY", err)
+
+    def test_mail_smtp_log_off_and_status(self):
+        sent = []
+
+        class FakeSMTP:
+            def __init__(self, host, port, timeout):
+                self.host = (host, port)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def ehlo(self):
+                pass
+
+            def has_extn(self, name):
+                return False
+
+            def login(self, user, password):
+                sent.append(("login", user, password))
+
+            def send_message(self, message):
+                sent.append(("send", self.host, message["To"]))
+
+        server = self.railway()
+        with mock.patch("smtplib.SMTP", FakeSMTP):
+            code, _, err = self.mail(server, "smtp", "--to", "ivan@company.com",
+                                     env={"SMTP_URL": "smtp://robot%40company.com:p%40ss@mail.company.com:587"})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sent, [("login", "robot@company.com", "p@ss"), ("send", ("mail.company.com", 587), "ivan@company.com")])
+        self.assertNotIn("p@ss", err)
+        self.assertEqual(self.mail(server)[1].strip(), "smtp")
+        self.assertEqual(self.mail(server, "smtp", "--to", "x@y.com", env={"SMTP_URL": "http://nope"})[0], 1)
+
+        self.assertEqual(self.mail(server, "log")[0], 0)
+        self.assertEqual(self.config()["env"]["LOGIN_LINKS_TO_LOG"], "1")
+        self.assertEqual(self.mail(server)[1].strip(), "log")
+        self.assertEqual(self.mail(server, "off")[0], 0)
+        env = self.config()["env"]
+        self.assertFalse(any(k in env for k in ("SMTP_URL", "LOGIN_LINKS_TO_LOG", "RESEND_API_KEY", "MAIL_FROM")))
+        self.assertEqual(self.mail(server)[1].strip(), "off")
+
+
+class MockResend:
+    """Resend API: запоминает POST /emails и отвечает заданным кодом."""
+
+    def __init__(self, status=200):
+        self.requests = []
+        box = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                box.requests.append((self.path, dict(self.headers), body))
+                raw = b'{"id": "msg_1"}' if status == 200 else b'{"message": "The domain is not verified"}'
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = "http://127.0.0.1:%d" % self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
 
 
 class DashboardActionsTest(unittest.TestCase):
@@ -1716,6 +1922,58 @@ class LauncherTest(unittest.TestCase):
         data = (Path(__file__).resolve().parents[1] / "small.cmd").read_bytes()
         self.assertTrue(all(b < 128 for b in data), "small.cmd должен быть только ASCII")
         self.assertEqual(data.count(b"\n"), data.count(b"\r\n"), "small.cmd должен быть с переводами строк CRLF")
+
+
+class PipeEncodingTest(unittest.TestCase):
+    """Вывод в канал (| Select-String, > файл) — в кодировке, которой его прочитают, а не в ANSI."""
+
+    def stream(self, tty=False):
+        stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1251")
+        stream.isatty = lambda: tty
+        return stream
+
+    def run_setup(self, env, tty=False, codepage=None):
+        out, err = self.stream(tty), self.stream(tty)
+        with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(sys, "stdout", out), \
+                mock.patch.object(sys, "stderr", err):
+            if "PYTHONIOENCODING" not in env:
+                os.environ.pop("PYTHONIOENCODING", None)
+            if codepage is None:
+                cli.setup_streams()
+            else:
+                with mock.patch.object(sys, "platform", "win32"), \
+                        mock.patch.object(cli, "_console_codepage", lambda: codepage):
+                    cli.setup_streams()
+        return out, err
+
+    def test_pythonioencoding_is_respected_even_under_isolated_mode(self):
+        out, err = self.run_setup({"PYTHONIOENCODING": "utf-8:replace"})
+        self.assertEqual(out.encoding, "utf-8")
+        self.assertEqual(err.encoding, "utf-8")
+
+    def test_unknown_pythonioencoding_does_not_crash(self):
+        out, _ = self.run_setup({"PYTHONIOENCODING": "no-such-codec"})
+        self.assertEqual(out.encoding, "cp1251")
+
+    def test_windows_pipe_uses_console_codepage(self):
+        for codepage, encoding in ((866, "cp866"), (65001, "utf-8"), (0, "cp1251")):
+            out, _ = self.run_setup({}, codepage=codepage)
+            self.assertEqual(out.encoding, encoding, codepage)
+
+    def test_terminal_output_is_left_alone(self):
+        out, _ = self.run_setup({"PYTHONIOENCODING": "utf-8"}, tty=True)
+        self.assertEqual(out.encoding, "cp1251")
+        self.assertEqual(out.errors, "replace")
+
+    @unittest.skipUnless(sys.platform == "win32", "кодировка консоли есть только на Windows")
+    def test_small_cmd_pipe_uses_requested_encoding(self):
+        # small.cmd запускает python -I: без нашей обработки PYTHONIOENCODING игнорировался, и в канал шёл cp1251.
+        launcher = str(Path(__file__).resolve().parents[1] / "small.cmd")
+        for encoding in ("utf-8", "cp866"):
+            proc = subprocess.run(["cmd", "/c", launcher, "--help"], capture_output=True,
+                                  env=dict(os.environ, PYTHONIOENCODING=encoding))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("Микро-приложения на Railway", proc.stdout.decode(encoding))
 
 
 class IgnoreRulesTest(unittest.TestCase):

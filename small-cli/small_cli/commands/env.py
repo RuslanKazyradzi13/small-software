@@ -37,10 +37,11 @@ def add_no_deploy(parser):
                         help="не перезапускать приложение (изменения вступят в силу при следующем деплое)")
 
 
-def change_env(root, set_vars=None, unset=(), deploy=True):
+def change_env(root, set_vars=None, unset=(), deploy=True, railway_only=None):
     """Меняет переменные в Railway (если приложение задеплоено) и в small.json — чтобы они не расходились.
 
-    Сначала Railway: если он откажет, small.json остаётся прежним. Возвращает True, если трогали Railway.
+    Сначала Railway: если он откажет, small.json остаётся прежним. railway_only — переменные, которые small ведёт
+    сам и в small.json не пишет (например, PUBLIC_URL). Возвращает True, если трогали Railway.
     """
     set_vars, unset = dict(set_vars or {}), list(unset)
     config_path, state = root / CONFIG_FILE, load_state(root / STATE_FILE)
@@ -51,8 +52,9 @@ def change_env(root, set_vars=None, unset=(), deploy=True):
         api = Railway(require_token())
         ids = (state["projectId"], state["environmentId"], state["serviceId"])
         existing = api.service_variables(*ids)
-        if set_vars:
-            api.upsert_variables(*ids, set_vars)
+        upsert = dict(set_vars, **(railway_only or {}))
+        if upsert:
+            api.upsert_variables(*ids, upsert)
         for name in unset:
             if name in existing:
                 api.delete_variable(*ids, name)
@@ -85,8 +87,11 @@ def cmd_env_list(args):
     railway_env = None
     if is_linked(state):
         if token_from_env():
+            # unrendered: ссылка ${{Postgres.DATABASE_URL}} из small.json совпадёт с записанной в Railway,
+            # а пароль базы не попадёт в терминал даже с --values.
             railway_env = {k: v for k, v in Railway(token_from_env()).service_variables(
-                state["projectId"], state["environmentId"], state["serviceId"]).items() if not k.startswith("RAILWAY_")}
+                state["projectId"], state["environmentId"], state["serviceId"], unrendered=True).items()
+                if not k.startswith("RAILWAY_")}
         else:
             say("Нет RAILWAY_API_TOKEN — показываю только %s" % CONFIG_FILE)
     names = sorted(set(config_env) | set(railway_env or {}))

@@ -1,6 +1,6 @@
 """small deploy: упаковать код -> найти проект по имени или создать его (projectCreate + serviceCreate)
--> записать переменные из small.json (variableCollectionUpsert) -> загрузить архив (POST .../up)
--> serviceDomainCreate -> опрашивать deployment(id).status -> напечатать https://<домен>.
+-> serviceDomainCreate -> записать переменные из small.json (variableCollectionUpsert) -> загрузить архив
+(POST .../up) -> опрашивать deployment(id).status -> напечатать https://<домен>.
 
 Прогресс пишется в stderr, итоговый URL — в stdout, поэтому `URL=$(small deploy)` работает.
 """
@@ -75,10 +75,23 @@ def cmd_deploy(args):
         # Сохраняем сразу: если сборка упадёт, повторный запуск не наплодит новых проектов.
         save_state(state_path, state)
 
-    if config["env"]:
+    if not state.get("domain"):
+        # Домен — до загрузки кода: его адрес нужен уже первой сборке (ссылки в письмах для входа по почте).
+        state["domain"] = ensure_domain(api, state, args.port)
+        save_state(state_path, state)
+        say("Публичный домен: %s" % state["domain"])
+
+    variables = dict(config["env"])
+    if variables.get("ACCESS_EMAILS") and "PUBLIC_URL" not in variables:
+        # После переименования домена Railway оставляет в RAILWAY_PUBLIC_DOMAIN прежний адрес — ссылки для входа
+        # вели бы на 404. Поэтому настоящий адрес передаём сами (только в Railway: домен может смениться).
+        variables["PUBLIC_URL"] = "https://" + state["domain"]
+    if variables:
         # До загрузки кода, чтобы новая сборка сразу получила переменные. Значения не печатаем.
-        api.upsert_variables(state["projectId"], state["environmentId"], state["serviceId"], config["env"])
-        say("Переменные из %s: %s" % (CONFIG_FILE, ", ".join(sorted(config["env"]))))
+        api.upsert_variables(state["projectId"], state["environmentId"], state["serviceId"], variables)
+        say("Переменные из %s: %s%s" % (CONFIG_FILE, ", ".join(sorted(config["env"])),
+                                         " (+ PUBLIC_URL для писем входа)" if "PUBLIC_URL" not in config["env"]
+                                         and "PUBLIC_URL" in variables else ""))
 
     try:
         up = api.upload(state["projectId"], state["environmentId"], state["serviceId"], tarball, args.message)
@@ -91,10 +104,6 @@ def cmd_deploy(args):
     if up.get("logsUrl"):
         say("Логи: %s" % up["logsUrl"].rstrip("&"))
 
-    if not state.get("domain"):
-        state["domain"] = ensure_domain(api, state, args.port)
-        save_state(state_path, state)
-        say("Публичный домен: %s" % state["domain"])
     url = "https://" + state["domain"]
 
     if args.no_wait:

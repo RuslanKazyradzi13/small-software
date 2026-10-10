@@ -4,11 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "small-cli"
-version = "0.4.0"
-description = "small deploy — деплой папки с кодом в Railway одной командой"
+version = "0.5.0"
+description = "A cloud for small software: deploy team apps to Railway in one command, private by default, shared by work email"
+license = {text = "MIT"}
+authors = [{name = "RuslanKazyradzi13"}]
+keywords = ["railway", "deploy", "internal-tools", "magic-link", "email-login", "cli"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Software Development :: Build Tools",
+]
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/RuslanKazyradzi13/small-software"
+Issues = "https://github.com/RuslanKazyradzi13/small-software/issues"
 
 [project.scripts]
 small = "small_cli.cli:main"

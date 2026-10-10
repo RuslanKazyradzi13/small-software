@@ -1,0 +1,21 @@
+name: Feature request
+description: An idea that would make small apps easier to ship or share
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+      description: How should it work? A command, an option, a page?
+  - type: textarea
+    id: context
+    attributes:
+      label: Who would use it
+      description: For example — a team of 5 sharing a report, an analyst shipping a calculator.

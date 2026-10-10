@@ -37,8 +37,8 @@ class ThreadingServer(ThreadingMixIn, WSGIServer):
 
 class Handler(WSGIRequestHandler):
     def log_message(self, format, *args):
-        # Не пишем ?token=... в логи.
-        super().log_message(format, *(re.sub(r"token=[^&\s]*", "token=***", str(a)) for a in args))
+        # Не пишем в логи ?token=... (ссылка-приглашение) и ?t=... (ссылка для входа из письма).
+        super().log_message(format, *(re.sub(r"\b(token|t)=[^&\s]*", r"\1=***", str(a)) for a in args))
 
 
 if __name__ == "__main__":

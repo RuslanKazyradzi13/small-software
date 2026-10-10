@@ -21,11 +21,12 @@ app.add_middleware(MagicLinkASGI)
 
 
 class HideToken(logging.Filter):
-    """uvicorn пишет в access-лог полный адрес — прячем ?token=..., чтобы он не попал в логи Railway."""
+    """uvicorn пишет в access-лог полный адрес — прячем ?token=... и ?t=... (ссылка для входа), чтобы они не попали
+    в логи Railway."""
 
     def filter(self, record):
         if isinstance(record.args, tuple):
-            record.args = tuple(re.sub(r"token=[^&\s]*", "token=***", a) if isinstance(a, str) else a
+            record.args = tuple(re.sub(r"\b(token|t)=[^&\s]*", r"\1=***", a) if isinstance(a, str) else a
                                 for a in record.args)
         return True
 

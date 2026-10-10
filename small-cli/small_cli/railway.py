@@ -301,12 +301,19 @@ class Railway:
     def logs(self, deployment_id, build=True, limit=40):
         return [entry["message"] for entry in self.log_entries(deployment_id, build=build, limit=limit)]
 
-    def service_variables(self, project_id, environment_id, service_id):
-        data = self.graphql(
-            "query($projectId: String!, $environmentId: String!, $serviceId: String) "
-            "{ variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }",
-            {"projectId": project_id, "environmentId": environment_id, "serviceId": service_id},
-        )
+    def service_variables(self, project_id, environment_id, service_id, unrendered=False):
+        """Переменные сервиса. unrendered=True — как записаны, без подстановки ссылок: `${{Postgres.DATABASE_URL}}`,
+        а не готовый адрес с паролем."""
+        ids = {"projectId": project_id, "environmentId": environment_id, "serviceId": service_id}
+        if not unrendered:
+            data = self.graphql(
+                "query($projectId: String!, $environmentId: String!, $serviceId: String) "
+                "{ variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }", ids)
+        else:
+            data = self.graphql(
+                "query($projectId: String!, $environmentId: String!, $serviceId: String, $unrendered: Boolean) "
+                "{ variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId, "
+                "unrendered: $unrendered) }", dict(ids, unrendered=True))
         return data["variables"]
 
     def project_services(self, project_id):

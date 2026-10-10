@@ -13,7 +13,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 from wsgiref.util import setup_testing_defaults
 
-from magic_link import COOKIE_NAME, MagicLink, MagicLinkASGI, _cookie_value, parse_tokens
+from urllib.parse import parse_qs, urlencode, urlsplit
+
+import magic_link
+from magic_link import COOKIE_NAME, LINK_TTL, MagicLink, MagicLinkASGI, _cookie_value, parse_emails, parse_tokens
 
 TOKEN = "s3cret-token"
 
@@ -95,11 +98,11 @@ class MagicLinkTest(unittest.TestCase):
         self.assertEqual(call(app, query="token=carol")[0], "403 Forbidden")
 
     def test_unconfigured_token_locks_everyone_out(self):
-        with mock.patch.dict("os.environ", {"ACCESS_TOKEN": ""}):
+        with mock.patch.dict("os.environ", {"ACCESS_TOKEN": "", "ACCESS_EMAILS": ""}):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 app = MagicLink(secret_app)
-        self.assertIn("ACCESS_TOKEN не задан", out.getvalue())
+        self.assertIn("доступ закрыт для всех", out.getvalue())
         self.assertEqual(call(app)[0], "403 Forbidden")
         self.assertEqual(call(app, query="token=")[0], "403 Forbidden")
 
@@ -246,6 +249,405 @@ class MagicLinkASGITest(unittest.TestCase):
         self.assertEqual(asgi_call(revoked, cookie=bob_cookie)[0], 403)
 
 
+class EmailLoginBase(unittest.TestCase):
+    """Вход по почте: письмо перехватывается (magic_link._send_login_mail), ссылка из него открывается тестом."""
+
+    EMAILS = "ivan@company.com, @team.com"
+
+    def setUp(self):
+        env = mock.patch.dict(os.environ, {"RAILWAY_PUBLIC_DOMAIN": "reports.up.railway.app", "PUBLIC_URL": "",
+                                           "LOGIN_LINKS_TO_LOG": "1", "RESEND_API_KEY": "", "SMTP_URL": ""})
+        env.start()
+        self.addCleanup(env.stop)
+        self.sent, self.langs = [], []
+        mailer = mock.patch("magic_link._send_login_mail",
+                            side_effect=lambda *args: (self.langs.append(args[3]), self.sent.append(args[:3])))
+        mailer.start()
+        self.addCleanup(mailer.stop)
+        self.app = self.make()
+
+    def make(self, emails=None, secret="test-secret"):
+        return MagicLink(secret_app, tokens="owner-token", request_url="", emails=emails or self.EMAILS, secret=secret)
+
+    def ask(self, email, app=None, ip="203.0.113.7", host="reports.up.railway.app", language=None):
+        headers = {"HTTP_X_FORWARDED_FOR": ip, "HTTP_HOST": host}
+        if language:
+            headers["HTTP_ACCEPT_LANGUAGE"] = language
+        return call(app or self.app, path="/_access/login", method="POST", body=urlencode({"email": email}).encode(),
+                    headers=headers)
+
+    def wait_mail(self, count=1, seconds=3):
+        deadline = time.monotonic() + seconds
+        while len(self.sent) < count and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return self.sent[count - 1] if len(self.sent) >= count else None
+
+    @staticmethod
+    def token_of(link):
+        return parse_qs(urlsplit(link).query)["t"][0]
+
+    def confirm(self, token, app=None):
+        return call(app or self.app, path="/_access/verify", method="POST", body=urlencode({"t": token}).encode(),
+                    headers={"HTTP_X_FORWARDED_PROTO": "https"})
+
+    def login(self, email="ivan@company.com", app=None):
+        before = len(self.sent)
+        self.ask(email, app, ip="192.0.2.%d" % before)
+        _, link, _ = self.wait_mail(before + 1)
+        status, headers, _, _ = self.confirm(self.token_of(link), app)
+        self.assertEqual(status, "302 Found")
+        return headers["Set-Cookie"].split(";")[0]
+
+
+class EmailLoginTest(EmailLoginBase):
+    def test_parse_emails(self):
+        self.assertEqual(parse_emails(" Ivan@Company.com, @Team.COM, мусор, a@b, ,x@y.com "), {"ivan@company.com", "@team.com", "x@y.com"})
+
+    def test_login_page_replaces_request_form(self):
+        status, _, body, _ = call(self.app)
+        self.assertEqual(status, "403 Forbidden")
+        self.assertIn("Вход по рабочей почте", body)
+        self.assertIn('action="/_access/login"', body)
+        self.assertIn('type="email"', body)
+        self.assertNotIn("Запросить доступ", body)
+
+    def test_allowed_email_gets_link_and_logs_in(self):
+        status, _, body, _ = self.ask(" Ivan@Company.com ")
+        self.assertEqual(status, "200 OK")
+        self.assertIn("Проверьте почту", body)
+        email, link, app_name = self.wait_mail()
+        self.assertEqual((email, app_name), ("ivan@company.com", "reports.up.railway.app"))
+        self.assertTrue(link.startswith("https://reports.up.railway.app/_access/verify?t="), link)
+
+        # Открытие ссылки (или почтовый сканер) ещё не входит: показывается кнопка.
+        query = urlsplit(link).query
+        status, headers, body, _ = call(self.app, path="/_access/verify", query=query)
+        self.assertEqual(status, "200 OK")
+        self.assertIn("войти как ivan@company.com", body)
+        self.assertIn('method="post" action="/_access/verify"', body)
+        self.assertNotIn("Set-Cookie", headers)
+        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+
+        status, headers, _, log = self.confirm(self.token_of(link))
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(headers["Location"], "/")
+        cookie = headers["Set-Cookie"]
+        self.assertTrue(cookie.startswith(COOKIE_NAME + "=e."))
+        for flag in ("HttpOnly", "SameSite=Lax", "Secure", "Max-Age=2592000"):
+            self.assertIn(flag, cookie)
+        self.assertIn("вход по почте (ivan@company.com)", log)
+        status, _, body, _ = call(self.app, cookie=cookie.split(";")[0])
+        self.assertEqual((status, body), ("200 OK", "secret page"))
+
+    def test_link_is_single_use(self):
+        self.ask("ivan@company.com")
+        token = self.token_of(self.wait_mail()[1])
+        for _ in range(2):  # сканер может открыть ссылку несколько раз — она остаётся рабочей
+            self.assertEqual(call(self.app, path="/_access/verify", query=urlencode({"t": token}))[0], "200 OK")
+        self.assertEqual(self.confirm(token)[0], "302 Found")
+        status, _, body, _ = self.confirm(token)
+        self.assertEqual(status, "403 Forbidden")
+        self.assertIn("Ссылка для входа устарела", body)
+        self.assertIn('action="/_access/login"', body)  # сразу можно запросить новую
+
+    def test_unknown_email_gets_the_same_answer_and_becomes_a_request(self):
+        known = self.ask("ivan@company.com")
+        unknown = self.ask("stranger@evil.example", ip="198.51.100.1")
+        self.assertEqual(known[:3], unknown[:3])  # по ответу не понять, есть ли адрес в списке
+        self.assertIn("[access-request] contact='stranger@evil.example'", unknown[3])
+        self.wait_mail()
+        time.sleep(0.2)
+        self.assertEqual([m[0] for m in self.sent], ["ivan@company.com"])
+
+    def test_domain_allowlist(self):
+        self.ask("petr@team.com")
+        self.assertEqual(self.wait_mail()[0], "petr@team.com")
+        for email in ("petr@team.com.evil.example", "petr@evilteam.com"):
+            self.ask(email, ip="198.51.100.%d" % len(email))
+        time.sleep(0.2)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_revoked_email_loses_its_session_immediately(self):
+        cookie = self.login("ivan@company.com")
+        team_cookie = self.login("olga@team.com")
+        revoked = self.make(emails="@team.com")  # ivan убран из ACCESS_EMAILS, секрет тот же
+        self.assertEqual(call(revoked, cookie=cookie)[0], "403 Forbidden")
+        self.assertEqual(call(revoked, cookie=team_cookie)[0], "200 OK")
+
+    def test_sessions_cannot_be_forged(self):
+        cookie = self.login()
+        other_secret = self.make(secret="another-secret")
+        self.assertEqual(call(other_secret, cookie=cookie)[0], "403 Forbidden")
+        payload, mac = cookie.split("=e.", 1)[1].split(".")
+        forged = magic_link._b64(json.dumps({"e": "boss@company.com", "x": 9999999999}).encode())
+        self.assertEqual(call(self.app, cookie="%s=e.%s.%s" % (COOKIE_NAME, forged, mac))[0], "403 Forbidden")
+        # Ссылку для входа нельзя выдать за сессию: подпись другого назначения.
+        self.ask("ivan@company.com", ip="198.51.100.9")
+        token = self.token_of(self.wait_mail(2)[1])
+        self.assertEqual(call(self.app, cookie="%s=e.%s" % (COOKIE_NAME, token))[0], "403 Forbidden")
+
+    def test_link_expires_after_15_minutes(self):
+        self.ask("ivan@company.com")
+        token = self.token_of(self.wait_mail()[1])
+        later = time.time() + LINK_TTL + 1
+        with mock.patch("magic_link.time.time", return_value=later):
+            status, _, body, _ = self.confirm(token)
+        self.assertEqual(status, "403 Forbidden")
+        self.assertIn("устарела", body)
+
+    def test_rate_limit_per_email(self):
+        for i in range(3):
+            self.assertEqual(self.ask("ivan@company.com", ip="198.51.100.%d" % i)[0], "200 OK")
+        status, _, body, _ = self.ask("ivan@company.com", ip="198.51.100.99")
+        self.assertEqual(status, "429 Too Many Requests")
+        self.assertIn("Слишком много попыток", body)
+
+    def test_bad_email(self):
+        status, _, body, _ = self.ask("not-an-email")
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn("ошибка", body)
+
+    def test_host_header_is_not_trusted_for_links(self):
+        with mock.patch.dict(os.environ, {"RAILWAY_PUBLIC_DOMAIN": ""}):
+            *_, log = self.ask("ivan@company.com", host="evil.example")
+            time.sleep(0.2)
+            self.assertEqual(self.sent, [])
+            self.assertIn("PUBLIC_URL", log)
+            self.ask("ivan@company.com", host="localhost:8080", ip="198.51.100.2")  # локальная разработка
+            self.assertTrue(self.wait_mail()[1].startswith("http://localhost:8080/_access/verify?t="))
+        with mock.patch.dict(os.environ, {"PUBLIC_URL": "https://reports.company.com/"}):
+            self.ask("ivan@company.com", host="evil.example", ip="198.51.100.3")
+            self.assertTrue(self.wait_mail(2)[1].startswith("https://reports.company.com/_access/verify?t="))
+
+    def test_logout_clears_cookie(self):
+        cookie = self.login()
+        status, headers, body, _ = call(self.app, path="/_access/logout", cookie=cookie)
+        self.assertEqual(status, "200 OK")
+        self.assertIn("Max-Age=0", headers["Set-Cookie"])
+        self.assertIn("Вы вышли", body)
+
+    def test_invitation_links_still_work_alongside_email(self):
+        status, headers, _, _ = call(self.app, query="token=owner-token")
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(call(self.app, cookie=headers["Set-Cookie"].split(";")[0])[0], "200 OK")
+
+    def test_without_secret_sessions_still_work_until_restart(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"SESSION_SECRET": ""}), contextlib.redirect_stdout(out):
+            app = MagicLink(secret_app, tokens="", request_url="", emails="ivan@company.com")
+        self.assertIn("SESSION_SECRET не задан", out.getvalue())
+        cookie = self.login(app=app)
+        self.assertEqual(call(app, cookie=cookie)[0], "200 OK")
+
+
+class LanguageTest(EmailLoginBase):
+    """Страницы и письма — на языке браузера: русским по-русски, остальным по-английски."""
+
+    EN = {"HTTP_ACCEPT_LANGUAGE": "en-US,en;q=0.9,ru;q=0.8"}
+
+    def test_pick_lang(self):
+        pick = magic_link.pick_lang
+        self.assertEqual(pick(""), "ru")  # браузер ничего не сказал
+        self.assertEqual(pick("en-US,en;q=0.9,ru;q=0.8"), "en")
+        self.assertEqual(pick("ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"), "ru")
+        self.assertEqual(pick("de-DE,de;q=0.9,en;q=0.5"), "en")
+        self.assertEqual(pick("fr-FR"), "en")  # ни ru, ни en — английский понятнее
+        self.assertEqual(pick("*"), "ru")  # «любой язык» — по умолчанию
+        self.assertEqual(pick("en;q=0.5, *;q=0.9"), "ru")
+        self.assertEqual(pick("en;q=0.3, ru;q=0.6"), "ru")
+        self.assertEqual(pick("ru", "en"), "en")  # ACCESS_LANG сильнее браузера
+        self.assertEqual(pick("en", "ru"), "ru")
+
+    def test_english_pages_and_mail(self):
+        status, headers, body, _ = call(self.app, headers=self.EN)
+        self.assertEqual(status, "403 Forbidden")
+        self.assertEqual(headers["Content-Language"], "en")
+        self.assertIn('<html lang="en">', body)
+        self.assertIn("Sign in with your work email", body)
+        self.assertIn("Email me a sign-in link", body)
+        self.assertNotIn("Вход", body)
+
+        _, _, body, _ = self.ask("ivan@company.com", language=self.EN["HTTP_ACCEPT_LANGUAGE"])
+        self.assertIn("Check your email", body)
+        self.assertEqual(self.wait_mail()[0], "ivan@company.com")
+        self.assertEqual(self.langs, ["en"])  # письмо — на языке того, кто просил вход
+        token = self.token_of(self.sent[0][1])
+        _, _, body, _ = call(self.app, path="/_access/verify", query=urlencode({"t": token}), headers=self.EN)
+        self.assertIn("sign in as ivan@company.com", body)
+        self.assertIn(">Sign in</button>", body)
+
+    def test_access_lang_forces_the_language(self):
+        with mock.patch.dict(os.environ, {"ACCESS_LANG": "en"}):
+            app = self.make()
+        self.assertIn("Sign in with your work email", call(app)[2])
+        with mock.patch.dict(os.environ, {"ACCESS_LANG": "ru"}):
+            app = self.make()
+        self.assertIn("Вход по рабочей почте", call(app, headers=self.EN)[2])
+
+    def test_request_form_in_english(self):
+        app = MagicLink(secret_app, tokens=TOKEN, request_url="")
+        body = call(app, headers=self.EN)[2]
+        self.assertIn("Invitation only", body)
+        self.assertIn('placeholder="Email or Telegram to reach you"', body)
+        self.assertIn(">Request access</button>", body)
+        self.assertIn("Request sent", call(app, path="/_access/request", method="POST", body=b"contact=x",
+                                           headers=self.EN)[2])
+
+
+class EmailLoginASGITest(EmailLoginBase):
+    def make(self, emails=None, secret="test-secret"):
+        return MagicLinkASGI(secret_asgi, tokens="", request_url="", emails=emails or self.EMAILS, secret=secret)
+
+    def test_full_flow_and_websocket(self):
+        status, _, body, _, _ = asgi_call(self.app)
+        self.assertEqual(status, 403)
+        self.assertIn("Вход по рабочей почте", body)
+        status, _, body, _, _ = asgi_call(self.app, path="/_access/login", method="POST",
+                                          body=b"email=olga%40team.com", headers={"x-forwarded-for": "203.0.113.7"})
+        self.assertEqual(status, 200)
+        token = self.token_of(self.wait_mail()[1])
+        status, _, body, _, _ = asgi_call(self.app, path="/_access/verify", query=urlencode({"t": token}))
+        self.assertEqual(status, 200)
+        self.assertIn("olga@team.com", body)
+        status, headers, _, _, log = asgi_call(self.app, path="/_access/verify", method="POST",
+                                               body=urlencode({"t": token}).encode())
+        self.assertEqual((status, headers["location"]), (302, "/"))
+        self.assertIn("вход по почте (olga@team.com)", log)
+        cookie = headers["set-cookie"].split(";")[0]
+        self.assertEqual(asgi_call(self.app, cookie=cookie)[2], "secret page")
+        *_, sent, _ = asgi_call(self.app, kind="websocket", cookie=cookie)
+        self.assertEqual(sent, [{"type": "websocket.accept"}])
+        self.assertEqual(asgi_call(self.app, path="/_access/verify", method="POST",
+                                   body=urlencode({"t": token}).encode())[0], 403)
+
+
+class MailServer:
+    """Мок Resend API: запоминает POST /emails, отвечает заданным кодом."""
+
+    def __init__(self, status=200):
+        self.requests = []
+        box = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                box.requests.append((self.path, dict(self.headers), json.loads(body)))
+                raw = b'{"id": "msg_1"}' if status == 200 else b'{"message": "The domain is not verified"}'
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = "http://127.0.0.1:%d" % self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class MailDeliveryTest(unittest.TestCase):
+    LINK = "https://reports.up.railway.app/_access/verify?t=abc.def"
+
+    def send(self, env):
+        out = io.StringIO()
+        base = {"LOGIN_LINKS_TO_LOG": "", "RESEND_API_KEY": "", "SMTP_URL": "", "MAIL_FROM": ""}
+        with mock.patch.dict(os.environ, dict(base, **env)), contextlib.redirect_stdout(out):
+            magic_link._send_login_mail("ivan@company.com", self.LINK, "reports.up.railway.app")
+        return out.getvalue()
+
+    def test_resend(self):
+        server = MailServer()
+        self.addCleanup(server.close)
+        log = self.send({"RESEND_API_KEY": "re_test_key", "RESEND_API_URL": server.url,
+                         "MAIL_FROM": "Отчёты <noreply@company.com>"})
+        path, headers, body = server.requests[0]
+        self.assertEqual(path, "/emails")
+        self.assertEqual(headers["Authorization"], "Bearer re_test_key")
+        self.assertTrue(headers["User-Agent"])
+        self.assertEqual((body["to"], body["from"]), (["ivan@company.com"], "Отчёты <noreply@company.com>"))
+        self.assertIn("reports.up.railway.app", body["subject"])
+        self.assertIn(self.LINK, body["text"])
+        self.assertIn("письмо для входа отправлено: ivan@company.com", log)
+        self.assertNotIn(self.LINK, log)  # в обычном режиме ссылка в лог не попадает
+
+    def test_resend_error_is_logged_without_the_key(self):
+        server = MailServer(status=403)
+        self.addCleanup(server.close)
+        log = self.send({"RESEND_API_KEY": "re_secret_key", "RESEND_API_URL": server.url})
+        self.assertIn("не удалось отправить письмо для входа на ivan@company.com: HTTP 403", log)
+        self.assertIn("not verified", log)
+        self.assertNotIn("re_secret_key", log)
+
+    def test_smtp(self):
+        sessions = []
+
+        class FakeSMTP:
+            def __init__(self, host, port, timeout):
+                self.calls = [("connect", host, port)]
+                sessions.append(self)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def ehlo(self):
+                self.calls.append(("ehlo",))
+
+            def has_extn(self, name):
+                return name == "starttls"
+
+            def starttls(self):
+                self.calls.append(("starttls",))
+
+            def login(self, user, password):
+                self.calls.append(("login", user, password))
+
+            def send_message(self, message):
+                self.calls.append(("send", message["To"], message["From"], message["Subject"],
+                                   message.get_body(("plain",)).get_content()))
+
+        with mock.patch("magic_link.smtplib.SMTP", FakeSMTP):
+            log = self.send({"SMTP_URL": "smtp://robot%40company.com:p%40ss@mail.company.com:587"})
+        calls = sessions[0].calls
+        self.assertEqual(calls[0], ("connect", "mail.company.com", 587))
+        self.assertIn(("starttls",), calls)
+        self.assertIn(("login", "robot@company.com", "p@ss"), calls)
+        send = next(c for c in calls if c[0] == "send")
+        self.assertEqual(send[1:3], ("ivan@company.com", "robot@company.com"))
+        self.assertIn(self.LINK, send[4])
+        self.assertIn("письмо для входа отправлено", log)
+        self.assertNotIn("p@ss", log)
+
+    def test_english_letter(self):
+        server = MailServer()
+        self.addCleanup(server.close)
+        out = io.StringIO()
+        env = {"LOGIN_LINKS_TO_LOG": "", "SMTP_URL": "", "RESEND_API_KEY": "re_test_key", "RESEND_API_URL": server.url}
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(out):
+            magic_link._send_login_mail("ivan@company.com", self.LINK, "reports.up.railway.app", "en")
+        body = server.requests[0][2]
+        self.assertEqual(body["subject"], "Sign in to reports.up.railway.app")
+        self.assertIn("Sign-in link for reports.up.railway.app:\n" + self.LINK, body["text"])
+        self.assertIn(">Sign in</a>", body["html"])
+
+    def test_log_mode_and_unconfigured(self):
+        self.assertIn("ссылка для входа (ivan@company.com): " + self.LINK, self.send({"LOGIN_LINKS_TO_LOG": "1"}))
+        log = self.send({})
+        self.assertIn("почта не настроена", log)
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"LOGIN_LINKS_TO_LOG": "", "RESEND_API_KEY": "", "SMTP_URL": ""}), \
+                contextlib.redirect_stdout(out):
+            MagicLink(secret_app, tokens="", emails="ivan@company.com", secret="s")
+        self.assertIn("small mail", out.getvalue())
+
+
 class TelegramInbox:
     """Мок Bot API: запоминает sendMessage."""
 
@@ -313,6 +715,14 @@ class TelegramTest(unittest.TestCase):
                            headers={"host": "shop.up.railway.app", "x-forwarded-for": "203.0.113.7"})[0]
         self.assertEqual(status, 200)
         self.check_message()
+
+    def test_unknown_email_at_login_reaches_telegram_with_exact_command(self):
+        with mock.patch.dict(os.environ, {"LOGIN_LINKS_TO_LOG": "1"}):
+            app = MagicLink(secret_app, tokens="", request_url="", emails="ivan@company.com", secret="s")
+        call(app, path="/_access/login", method="POST", body=b"email=bob%40example.com",
+             headers={"HTTP_HOST": "shop.up.railway.app", "HTTP_X_FORWARDED_FOR": "203.0.113.7"})
+        self.check_message()
+        self.assertIn("small access add bob@example.com", self.inbox.messages[0][1]["text"])
 
     def test_without_telegram_settings_nothing_is_sent(self):
         with mock.patch.dict(os.environ, {"TELEGRAM_CHAT_ID": ""}):
