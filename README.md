@@ -175,8 +175,8 @@ Full CLI reference: [small-cli/README.md](small-cli/README.md) · [по-русс
 ## Development
 
 ```bash
-cd small-cli   && python -m unittest discover -s tests     # 120 tests (+ real FastAPI/Streamlit when installed)
-cd magic-link  && python -m unittest test_magic_link       # 51 tests
+cd small-cli   && python -m unittest discover -s tests     # 160 tests (+ real FastAPI/Streamlit when installed)
+cd magic-link  && python -m unittest test_magic_link       # 65 tests
 cd magic-link  && node --test                              # 20 tests
 ```
 

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.0 — 2026-10-11
+
+### Added
+- **`small mcp` — AI agents deploy and share apps.** An MCP server on stdin/stdout for Claude Code, Cursor and other
+  MCP clients: *"Deploy this folder and give ivan@company.com access."* Tools: `init_app`, `deploy_app` (streams
+  build progress), `share_app`, `revoke_access`, `list_access`, `list_apps`, `app_logs`, `set_env`. There is no
+  delete tool: `small destroy` stays in the terminal. Setup: `claude mcp add small -- small mcp`.
+- **Share button in `small dashboard`.** Add or revoke emails, whole domains and personal links without a terminal;
+  same effect as `small access add` / `revoke`. A new personal link is shown once. The page's state-changing
+  requests need a per-run key header and pass `Host`/`Origin`/`Sec-Fetch-Site` checks; the page can't be framed.
+- **Sign-in by email in the `streamlit` template.** `require_access()` now uses `MagicLinkGate` — a new public helper
+  in `magic_link.py` for frameworks that can't take middleware: the same one-time links, limits, logs and
+  session format as the other templates. The session cookie is written by a same-origin frame, so it is not
+  HttpOnly; personal `?token=` links work as before.
+- **One-command Windows install:** `irm https://raw.githubusercontent.com/RuslanKazyradzi13/small-software/main/install.ps1 | iex`.
+  small gets its own venv and a `small.cmd` shim first on PATH, so Smart App Control has no unsigned `small.exe`
+  to block. Re-run to upgrade; `-Uninstall` removes it. Tested in CI under Windows PowerShell 5.1 and PowerShell 7.
+- English documentation for `magic-link` (Russian moved to `README.ru.md`); code comments are in English.
+
+### Changed
+- `small access` logic is split into functions that return data (`list_access`, `grant_access`, `revoke_access`),
+  shared by the CLI, the dashboard and the MCP server. CLI output is unchanged.
+
 ## 0.6.0 — 2026-10-10
 
 ### Added

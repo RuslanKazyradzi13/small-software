@@ -1,9 +1,9 @@
-# Секреты и локальное состояние small: ACCESS_TOKEN, ключи из env, ID проектов на этой машине
+# Secrets and small's local state: ACCESS_TOKEN, keys from env, project IDs on this machine
 small.json
 .small.json
 .env
 
-# Временные файлы Office
+# Office temp files
 ~$*
 
 # Python / Node
@@ -16,8 +16,8 @@ dist/
 venv/
 node_modules/
 
-# Личные заметки и архив (в git не нужны)
+# Personal notes and archive (not needed in git)
 archive/
 
-# Видео и материалы для соцсетей — большие файлы, в git не нужны
+# Videos and social media material: large files, not needed in git
 promo/

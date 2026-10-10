@@ -1,7 +1,7 @@
-"""small — микро-приложения на Railway одной командой.
+"""small: micro-apps on Railway with one command.
 
-Точка входа: разбор аргументов и обработка ошибок. Сами команды — в small_cli/commands/,
-общие помощники — в small_cli/common.py.
+Entry point: argument parsing and error handling. The commands themselves live in small_cli/commands/,
+shared helpers in small_cli/common.py.
 """
 
 import argparse
@@ -31,9 +31,10 @@ def main(argv=None):
 
 
 def setup_streams():
-    """В терминал Python пишет Unicode сам. Вывод в канал или файл (`small logs | Select-String вход`) он кодирует
-    в ANSI (cp1251), а PowerShell читает его в кодировке консоли (866 или UTF-8): кириллица превращается в мусор,
-    и поиск по ней ничего не находит. Поэтому в канал пишем в кодировке, которой его прочитают."""
+    """Python writes Unicode to a terminal on its own. Output to a pipe or file
+    (`small logs | Select-String <Cyrillic word>`) it encodes as ANSI (cp1251), while PowerShell reads it in the
+    console encoding (866 or UTF-8): Cyrillic turns into garbage and searching for it finds nothing. So for a pipe
+    we write in the encoding it will be read with."""
     encoding = pipe_encoding()
     for stream in (sys.stdout, sys.stderr):
         if not hasattr(stream, "reconfigure"):
@@ -45,8 +46,8 @@ def setup_streams():
 
 
 def pipe_encoding():
-    """Кодировка для вывода в канал: PYTHONIOENCODING, если задана (small.cmd запускает `python -I`, и сам Python
-    её не читает), иначе на Windows — кодировка консоли. None — оставить как есть."""
+    """Encoding for output to a pipe: PYTHONIOENCODING if set (small.cmd runs `python -I`, so Python itself
+    does not read it), otherwise on Windows the console encoding. None means leave it as is."""
     explicit = os.environ.get("PYTHONIOENCODING", "").split(":")[0]
     if explicit:
         try:
@@ -55,7 +56,7 @@ def pipe_encoding():
             return None
     if sys.platform != "win32":
         return None
-    codepage = _console_codepage()  # 0 — у процесса нет консоли
+    codepage = _console_codepage()  # 0: the process has no console
     return "utf-8" if codepage == 65001 else "cp%d" % codepage if codepage else None
 
 

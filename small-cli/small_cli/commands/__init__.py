@@ -1,6 +1,6 @@
-"""Команды small. Каждый модуль добавляет свои подкоманды функцией register(subparsers).
+"""small commands. Each module adds its subcommands with a register(subparsers) function.
 
-Порядок здесь — порядок в `small --help`: от создания приложения к его удалению.
+The order here is the order in `small --help`: from creating an app to deleting it.
 """
 
 from . import access, dashboard, db, deploy, destroy, domain, env, init, link, logs, mail, mcp, notify, sleep

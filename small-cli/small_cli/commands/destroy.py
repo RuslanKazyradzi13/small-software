@@ -1,5 +1,5 @@
-"""small destroy: удалить приложение из Railway — проект целиком, если в нём только сервисы этого приложения
-(сам сервис и его базы данных), иначе только их. Затем удаляется .small.json; small.json остаётся."""
+"""small destroy: delete the app from Railway — the whole project if it holds only this app's services
+(the service itself and its databases), otherwise just those. Then .small.json is deleted; small.json stays."""
 
 from ..common import CliError, app_dir, ask, linked_state, require_token, say
 from ..config import CONFIG_FILE, STATE_FILE

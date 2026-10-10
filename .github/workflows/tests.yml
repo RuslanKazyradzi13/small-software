@@ -5,7 +5,7 @@ on:
   pull_request:
 
 env:
-  PYTHONIOENCODING: utf-8  # иначе на Windows русский текст в логах превращается в ??
+  PYTHONIOENCODING: utf-8  # otherwise Russian text in the logs turns into ?? on Windows
 
 jobs:
   small-cli:
@@ -26,15 +26,15 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/setup-node@v7  # для теста шаблона node-http
+      - uses: actions/setup-node@v7  # for the node-http template test
         with:
           node-version: "20"
-      - name: Тесты (без Streamlit и FastAPI — их тесты пропускаются)
+      - name: Tests (without Streamlit and FastAPI, so their tests are skipped)
         working-directory: small-cli
         run: python -m unittest discover -s tests -v
 
   framework-templates:
-    name: small-cli · шаблоны streamlit и fastapi на настоящих фреймворках
+    name: small-cli · streamlit and fastapi templates on the real frameworks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -42,25 +42,25 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install "streamlit>=1.40,<2" "fastapi>=0.110,<1" "uvicorn>=0.29,<1" httpx
-      - name: Тесты шаблонов streamlit и fastapi
+      - name: streamlit and fastapi template tests
         working-directory: small-cli
         run: python -m unittest discover -s tests -k StreamlitTemplateTest -k FastAPITemplateTest -v
 
   package:
-    name: small-cli · пакет для PyPI
+    name: small-cli · PyPI package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - name: Сборка и проверка метаданных
+      - name: Build and check metadata
         working-directory: small-cli
         run: |
           python -m pip install --upgrade build twine
           python -m build
           python -m twine check --strict dist/*
-      - name: Установка из wheel в чистое окружение и первый запуск по-английски
+      - name: Install from the wheel into a clean environment and run it for the first time in English
         env:
           SMALL_LANG: en
         run: |
@@ -75,29 +75,29 @@ jobs:
           python -c "import re, sys; t = open('out.txt', encoding='utf-8').read(); c = re.findall('[Ѐ-ӿ]+', t); sys.exit('Cyrillic in English output: %s' % c if c else 0)"
 
   windows-installer:
-    name: small-cli · установщик install.ps1 · ${{ matrix.ps }}
+    name: small-cli · install.ps1 installer · ${{ matrix.ps }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        ps: [powershell, pwsh]  # install.ps1 запускается в Windows PowerShell 5.1 и в PowerShell 7
+        ps: [powershell, pwsh]  # install.ps1 runs in both Windows PowerShell 5.1 and PowerShell 7
     defaults:
       run:
-        shell: pwsh  # сами проверки — всегда в pwsh; от матрицы зависит только то, чем запущен install.ps1
+        shell: pwsh  # the checks themselves always run in pwsh; the matrix only decides what runs install.ps1
     env:
-      SMALL_NO_PATH: "1"  # PATH пользователя не трогаем (кроме последнего шага)
+      SMALL_NO_PATH: "1"  # leave the user PATH alone (except in the last step)
       SMALL_LANG: en
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - name: Сборка wheel
+      - name: Build the wheel
         working-directory: small-cli
         run: |
           python -m pip install build
           python -m build
-      - name: Установка из wheel во временную папку
+      - name: Install from the wheel into a temporary folder
         run: |
           $wheel = (Get-ChildItem small-cli/dist/*.whl).FullName
           $dir = Join-Path $env:RUNNER_TEMP 'small-install'
@@ -107,7 +107,7 @@ jobs:
           $env:SMALL_INSTALL_DIR = $dir
           ${{ matrix.ps }} -NoProfile -ExecutionPolicy Bypass -File install.ps1
           if ($LASTEXITCODE -ne 0) { throw "install.ps1: exit code $LASTEXITCODE" }
-      - name: small.cmd — версия, small init, аргументы с пробелами, коды выхода
+      - name: small.cmd (version, small init, arguments with spaces, exit codes)
         working-directory: ${{ runner.temp }}
         run: |
           $small = Join-Path $env:SMALL_INSTALL_DIR 'bin\small.cmd'
@@ -129,13 +129,13 @@ jobs:
           & $small init demo/app.py 2>$null
           if ($LASTEXITCODE -ne 1) { throw "a CLI error must exit with 1, got $LASTEXITCODE" }
           $global:LASTEXITCODE = 0
-      - name: Повторный запуск обновляет на месте
+      - name: A second run updates in place
         run: |
           ${{ matrix.ps }} -NoProfile -ExecutionPolicy Bypass -File install.ps1
           if ($LASTEXITCODE -ne 0) { throw "install.ps1 (second run): exit code $LASTEXITCODE" }
           & (Join-Path $env:SMALL_INSTALL_DIR 'bin\small.cmd') --version
           if ($LASTEXITCODE -ne 0) { throw "small --version after the second run: exit code $LASTEXITCODE" }
-      - name: Ошибка pip — ненулевой код выхода, а -Uninstall убирает остатки
+      - name: A pip failure gives a non-zero exit code, and -Uninstall cleans up the leftovers
         run: |
           $env:SMALL_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'small-broken'
           $env:SMALL_PACKAGE = Join-Path $env:RUNNER_TEMP 'no-such-package.whl'
@@ -143,12 +143,12 @@ jobs:
           if ($LASTEXITCODE -eq 0) { throw 'install.ps1 must fail when pip fails' }
           ${{ matrix.ps }} -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Uninstall
           if ($LASTEXITCODE -ne 0 -or (Test-Path $env:SMALL_INSTALL_DIR)) { throw '-Uninstall did not clean up after a failed install' }
-      - name: Удаление (-Uninstall)
+      - name: Uninstall (-Uninstall)
         run: |
           ${{ matrix.ps }} -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Uninstall
           if ($LASTEXITCODE -ne 0) { throw "install.ps1 -Uninstall: exit code $LASTEXITCODE" }
           if (Test-Path $env:SMALL_INSTALL_DIR) { throw "$env:SMALL_INSTALL_DIR still exists" }
-      - name: PATH пользователя — запись и удаление (машина CI одноразовая)
+      - name: Add to and remove from the user PATH (the CI machine is disposable)
         env:
           SMALL_NO_PATH: "0"
         run: |
@@ -159,7 +159,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "install.ps1: exit code $LASTEXITCODE" }
           $after = & $read
           if ($after -ne $bin -and -not $after.StartsWith("$bin;")) { throw "the user PATH does not start with ${bin}: $after" }
-          # PATH нового окна: системный, затем пользовательский — small должен найтись как small.cmd
+          # PATH as a new window sees it, system then user: small must resolve to small.cmd
           $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
           $found = (Get-Command small).Source
           if ($found -ne (Join-Path $bin 'small.cmd')) { throw "small resolves to $found" }

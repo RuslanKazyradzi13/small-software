@@ -1,4 +1,4 @@
-"""small link / small open: ссылка-приглашение задеплоенного приложения (общая или личная, --as ИМЯ)."""
+"""small link / small open: the invite link of a deployed app (shared or personal, --as NAME)."""
 
 import webbrowser
 

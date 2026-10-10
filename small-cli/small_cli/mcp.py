@@ -1,10 +1,10 @@
-"""MCP-сервер small: ИИ-агент (Claude Code, Cursor и другие) сам создаёт, деплоит и расшаривает приложения.
+"""small's MCP server: an AI agent (Claude Code, Cursor and others) creates, deploys and shares apps on its own.
 
-Протокол — JSON-RPC 2.0 через stdin/stdout, по сообщению в строке (https://modelcontextprotocol.io). Инструменты
-вызывают те же команды, что и терминал: вывод команды собирается и возвращается агенту, строки прогресса уходят
-уведомлениями notifications/progress. Удаления приложений (small destroy) здесь нет нарочно — только в терминале.
+The protocol is JSON-RPC 2.0 over stdin/stdout, one message per line (https://modelcontextprotocol.io). Tools
+call the same commands as the terminal: the command's output is collected and returned to the agent, progress lines
+go out as notifications/progress. Deleting apps (small destroy) is deliberately absent here: terminal only.
 
-stdout принадлежит протоколу: команды пишут в перехваченные потоки, а сообщения — прямо в байтовый stdout.
+stdout belongs to the protocol: commands write to captured streams, and messages go straight to the byte stdout.
 """
 
 import io
@@ -20,8 +20,8 @@ from .config import ConfigError
 from .i18n import tr
 from .railway import RailwayError, token_from_env
 
-# Свежие версии протокола — первыми. Просит клиент знакомую — отвечаем ею же, иначе — самой новой из наших:
-# small использует только tools/list и tools/call, они одинаковы во всех версиях.
+# Newest protocol versions first. If the client asks for one we know, we answer with it, otherwise with our newest:
+# small uses only tools/list and tools/call, and they are the same in all versions.
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 
 INSTRUCTIONS = (
@@ -134,11 +134,11 @@ TOOLS = [
 
 
 class ToolError(Exception):
-    """Ошибка в аргументах инструмента: агент увидит её и сможет исправить вызов."""
+    """An error in a tool's arguments: the agent will see it and can fix the call."""
 
 
 def serve(stdin=None, stdout=None):
-    """Читает запросы до конца stdin. Возвращает код выхода."""
+    """Reads requests until the end of stdin. Returns the exit code."""
     stdin = stdin or sys.stdin.buffer
     stdout = stdout or sys.stdout.buffer
     server = Server(stdout)
@@ -163,18 +163,18 @@ class Server:
             return self.send(_error(None, -32700, "Parse error"))
         if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or "method" not in message:
             if isinstance(message, dict) and ("result" in message or "error" in message):
-                return None  # ответ клиента на наш запрос — мы их не шлём
+                return None  # a client's response to our request; we never send any
             return self.send(_error(message.get("id") if isinstance(message, dict) else None, -32600,
                                     "Invalid Request"))
         request_id, method = message.get("id"), message["method"]
         params = message.get("params") or {}
         if request_id is None:
-            return None  # уведомление: notifications/initialized, notifications/cancelled — ответа не ждут
+            return None  # a notification: notifications/initialized, notifications/cancelled; no response expected
         try:
             result = self.dispatch(method, params, request_id)
         except _RpcError as e:
             return self.send(_error(request_id, e.code, str(e)))
-        except Exception as e:  # noqa: BLE001 — сервер не падает из-за одного запроса
+        except Exception as e:  # noqa: BLE001 — the server must not crash because of one request
             return self.send(_error(request_id, -32603, "Internal error: %s" % type(e).__name__))
         self.send({"jsonrpc": "2.0", "id": request_id, "result": result})
 
@@ -219,7 +219,7 @@ def _error(request_id, code, message):
 
 
 def call_tool(name, arguments, progress=None):
-    """Результат tools/call: текст для агента; isError — команда не удалась или аргументы неверны."""
+    """The tools/call result: text for the agent; isError means the command failed or the arguments are wrong."""
     try:
         if not isinstance(arguments, dict):
             raise ToolError(tr("arguments must be an object", "аргументы должны быть объектом"))
@@ -229,7 +229,7 @@ def call_tool(name, arguments, progress=None):
     return {"content": [{"type": "text", "text": text.strip() or "OK"}], "isError": code != 0}
 
 
-# --- инструменты ---
+# --- tools ---
 
 def _init(args, progress):
     argv = ["init", _path(args, must_exist=False), "--template", _choice(args, "template", "python-http")]
@@ -276,7 +276,7 @@ def _set_env(args, progress):
     if not values and not names:
         raise ToolError(tr("nothing to change: pass set or unset", "нечего менять: передайте set или unset"))
     text = []
-    if names:  # сначала удаление без перезапуска: перезапустит set, а если его нет — второй вызов ниже
+    if names:  # remove first without a restart: set will restart, and if there is no set, the call below does
         code, out = run_cli(["env", "unset", "-C", path] + (["--no-deploy"] if values else []) + names, progress)
         text.append(out)
         if code:
@@ -305,7 +305,7 @@ HANDLERS = {"init_app": _init, "deploy_app": _deploy, "share_app": _share, "revo
 
 
 def run_cli(argv, progress=None):
-    """Команда small как в терминале: (код, stdout + журнал). Вопросы ask() не задаются: stdin — не терминал."""
+    """A small command run as in the terminal: (code, stdout + log). ask() never prompts: stdin is not a terminal."""
     from .cli import build_parser
 
     out, err = io.StringIO(), _Lines(progress)
@@ -313,7 +313,7 @@ def run_cli(argv, progress=None):
         try:
             args = build_parser().parse_args(argv)
             code = args.func(args) or 0
-        except SystemExit as e:  # argparse отверг аргументы и уже написал почему
+        except SystemExit as e:  # argparse rejected the arguments and has already said why
             code = e.code if isinstance(e.code, int) else 2
         except (CliError, ConfigError, RailwayError) as e:
             print(tr("Error: %s", "Ошибка: %s") % e, file=sys.stderr)
@@ -323,7 +323,7 @@ def run_cli(argv, progress=None):
 
 
 class _Lines(io.StringIO):
-    """Перехваченный stderr: копит текст и отдаёт каждую готовую строку в progress."""
+    """Captured stderr: accumulates text and passes each complete line to progress."""
 
     def __init__(self, progress):
         super().__init__()

@@ -1,4 +1,4 @@
-"""small mcp — MCP-сервер: ИИ-агент (Claude Code, Cursor и другие) деплоит и расшаривает приложения сам."""
+"""small mcp: an MCP server, so an AI agent (Claude Code, Cursor and others) deploys and shares apps by itself."""
 
 from .. import mcp as server
 from ..i18n import tr

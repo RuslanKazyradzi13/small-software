@@ -1,8 +1,8 @@
-"""small notify: уведомления о запросах доступа в Telegram.
+"""small notify: Telegram notifications about access requests.
 
-Кнопка «Запросить доступ» на экране 403 отправляет запрос в приложение; если у приложения заданы
-TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID, middleware пересылает его владельцу в Telegram. Эта команда
-проверяет токен бота, находит ID чата, шлёт пробное сообщение и записывает обе переменные.
+The "Request access" button on the 403 screen sends a request to the app; if the app has
+TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID set, the middleware forwards it to the owner in Telegram. This command
+checks the bot token, finds the chat ID, sends a test message and writes both variables.
 """
 
 import argparse
@@ -83,7 +83,7 @@ def bot_token():
 
 
 def find_chat(token, username, wait):
-    """ID чата из последнего сообщения боту; если сообщений нет — просим написать и ждём."""
+    """Chat ID from the latest message to the bot; if there are no messages, asks for one and waits."""
     deadline, offset, asked = time.monotonic() + wait, None, False
     while True:
         updates = telegram(token, "getUpdates", {"timeout": 0, **({"offset": offset} if offset else {})})

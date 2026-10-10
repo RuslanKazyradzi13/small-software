@@ -1,7 +1,8 @@
-"""Доступ к приложению: ACCESS_TOKEN (ссылки-приглашения "имя:токен,…") и ACCESS_EMAILS (вход по почте).
+"""App access: ACCESS_TOKEN (invite links "name:token,…") and ACCESS_EMAILS (sign-in by email).
 
-Тот же формат понимают magic_link.py, magic-link.js и шаблон streamlit: убрали чей-то токен — его ссылка
-и куки перестают работать, у остальных всё остаётся. Убрали адрес из ACCESS_EMAILS — вход по нему закрыт сразу.
+magic_link.py, magic-link.js and the streamlit template understand the same format: remove someone's token and
+their link and cookie stop working, while everyone else keeps access. Remove an address from ACCESS_EMAILS and
+sign-in with it is closed at once.
 """
 
 import re
@@ -38,12 +39,12 @@ def new_token():
 
 
 def is_email(value):
-    """Адрес почты или целый домен "@company.com"."""
+    """An email address or a whole domain "@company.com"."""
     return bool(EMAIL_RE.match(value) or DOMAIN_RE.match(value))
 
 
 def parse_emails(value):
-    """"Ivan@Company.com, @team.com" -> ["ivan@company.com", "@team.com"]: без регистра, повторов и мусора."""
+    """"Ivan@Company.com, @team.com" -> ["ivan@company.com", "@team.com"]: lowercased, without duplicates or junk."""
     found = []
     for item in (value or "").split(","):
         item = item.strip().lower()
@@ -53,7 +54,7 @@ def parse_emails(value):
 
 
 def app_env(root, state, warn=None):
-    """(переменные приложения, откуда каждая): Railway, поверх — непустые значения из small.json."""
+    """(app variables, where each one comes from): Railway, overlaid with non-empty values from small.json."""
     env, sources = {}, {}
     linked = all(state.get(k) for k in ("projectId", "environmentId", "serviceId"))
     if linked and token_from_env():
@@ -72,7 +73,7 @@ def app_env(root, state, warn=None):
 
 
 def current(root, state, warn=None):
-    """(записи ACCESS_TOKEN, откуда): из small.json, иначе из переменных сервиса в Railway, иначе ([], None)."""
+    """(ACCESS_TOKEN entries, source): from small.json, else from the service variables in Railway, else ([], None)."""
     raw = load_config(root / CONFIG_FILE)["env"].get("ACCESS_TOKEN")
     if raw:
         return parse(raw), CONFIG_FILE
@@ -83,7 +84,7 @@ def current(root, state, warn=None):
 
 
 def pick(entries, name=None):
-    """Токен человека name; без имени — первый (владельца). None, если такого нет."""
+    """The token of the person `name`; without a name, the first one (the owner's). None if there is no such entry."""
     if name is None:
         return entries[0][1] if entries else None
     return next((token for who, token in entries if who == name), None)
@@ -95,10 +96,10 @@ def invite_link(domain, token):
 
 
 def email_login_problem(root):
-    """None — код приложения умеет вход по почте; иначе — что мешает и как исправить.
+    """None if the app code supports sign-in by email; otherwise, what is in the way and how to fix it.
 
-    Streamlit нельзя обернуть middleware: вход по почте там делает require_access() в app.py через MagicLinkGate
-    из magic_link.py, поэтому нужны новые версии обоих файлов."""
+    Streamlit cannot be wrapped in middleware: there sign-in by email is done by require_access() in app.py via
+    MagicLinkGate from magic_link.py, so new versions of both files are needed."""
     app = root / "app.py"
     source = app.read_text(encoding="utf-8", errors="replace") if app.is_file() else ""
     streamlit = "streamlit" in source

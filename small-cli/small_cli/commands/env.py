@@ -1,5 +1,5 @@
-"""small env: переменные приложения. set/unset меняют их сразу в Railway и в small.json — иначе следующий
-small deploy вернул бы старые значения из small.json."""
+"""small env: the app's variables. set/unset change them right away in both Railway and small.json; otherwise the
+next small deploy would bring back the old values from small.json."""
 
 import argparse
 import json
@@ -47,14 +47,14 @@ def add_no_deploy(parser):
 
 
 def change_env(root, set_vars=None, unset=(), deploy=True, railway_only=None):
-    """Меняет переменные в Railway (если приложение задеплоено) и в small.json — чтобы они не расходились.
+    """Changes variables in Railway (if the app is deployed) and in small.json, so that they don't diverge.
 
-    Сначала Railway: если он откажет, small.json остаётся прежним. railway_only — переменные, которые small ведёт
-    сам и в small.json не пишет (например, PUBLIC_URL). Возвращает True, если трогали Railway.
+    Railway first: if it refuses, small.json stays as it was. railway_only are variables that small manages
+    itself and doesn't write to small.json (e.g. PUBLIC_URL). Returns True if Railway was touched.
     """
     set_vars, unset = dict(set_vars or {}), list(unset)
     config_path, state = root / CONFIG_FILE, load_state(root / STATE_FILE)
-    load_config(config_path)  # битый small.json — ошибка до любых изменений
+    load_config(config_path)  # a broken small.json is an error before any changes
     raw = json.loads(config_path.read_text(encoding="utf-8-sig")) if config_path.is_file() else {}
 
     if is_linked(state):
@@ -99,8 +99,8 @@ def cmd_env_list(args):
     railway_env = None
     if is_linked(state):
         if token_from_env():
-            # unrendered: ссылка ${{Postgres.DATABASE_URL}} из small.json совпадёт с записанной в Railway,
-            # а пароль базы не попадёт в терминал даже с --values.
+            # unrendered: the ${{Postgres.DATABASE_URL}} reference from small.json matches the one stored in Railway,
+            # and the database password doesn't reach the terminal even with --values.
             railway_env = {k: v for k, v in Railway(token_from_env()).service_variables(
                 state["projectId"], state["environmentId"], state["serviceId"], unrendered=True).items()
                 if not k.startswith("RAILWAY_")}

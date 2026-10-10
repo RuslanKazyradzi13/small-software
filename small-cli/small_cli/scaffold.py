@@ -1,4 +1,4 @@
-"""Шаблоны для `small init`: файлы приложения и правила .gitignore / .railwayignore."""
+"""Templates for `small init`: app files and .gitignore / .railwayignore rules."""
 
 from pathlib import Path
 
@@ -7,7 +7,7 @@ from .i18n import tr
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 DEFAULT_TEMPLATE = "python-http"
 
-# description — (английский, русский): язык выбирается при вызове, см. description().
+# description is (English, Russian): the language is chosen at call time, see description().
 TEMPLATES = {
     "python-http": {
         "description": ("Python 3, standard library (wsgiref) + magic_link.py",
@@ -31,12 +31,12 @@ TEMPLATES = {
     },
 }
 
-# small.json хранит ACCESS_TOKEN и другие секреты, .small.json — ID проекта на этой машине.
+# small.json holds ACCESS_TOKEN and other secrets, .small.json the project IDs on this machine.
 GITIGNORE_COMMON = ["small.json", ".small.json", ".env"]
-# Нужно в git, но не нужно в Railway.
+# Needed in git, but not in Railway.
 RAILWAYIGNORE = ["*.md", "tests/", ".vscode/", ".idea/"]
 
-IGNORE_HEADERS = {  # (английский, русский)
+IGNORE_HEADERS = {  # (English, Russian)
     ".gitignore": ("# Do not commit", "# Не коммитить"),
     ".railwayignore": ("# Do not upload to Railway (in addition to .gitignore)",
                        "# Не загружать в Railway (в дополнение к .gitignore)"),
@@ -44,12 +44,12 @@ IGNORE_HEADERS = {  # (английский, русский)
 
 
 def description(template):
-    """Описание шаблона на языке пользователя (для `small init --help`)."""
+    """Template description in the user's language (for `small init --help`)."""
     return tr(*TEMPLATES[template]["description"])
 
 
 def template_files(template):
-    """{имя файла: содержимое} файлов приложения из шаблона."""
+    """{file name: contents} of the template's app files."""
     folder = TEMPLATES_DIR / template
     return {p.name: p.read_bytes() for p in sorted(folder.iterdir()) if p.is_file()}
 
@@ -62,9 +62,9 @@ def ignore_rules(template):
 
 
 def merge_ignore(path, lines):
-    """Создаёт ignore-файл или дописывает в него недостающие строки, ничего не удаляя.
+    """Creates an ignore file or appends the missing lines to it, without removing anything.
 
-    Возвращает "created", "updated" или "unchanged".
+    Returns "created", "updated" or "unchanged".
     """
     exists = path.is_file()
     text = path.read_text(encoding="utf-8-sig") if exists else ""

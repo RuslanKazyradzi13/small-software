@@ -1,39 +1,40 @@
-"""Защита веб-приложения: вход по рабочей почте или по ссылке-приглашению. Один файл, без зависимостей, Python 3.8+.
+"""Protect a web app: sign in with a work email or an invitation link. One file, no dependencies, Python 3.8+.
 
     from magic_link import MagicLink, MagicLinkASGI
-    application = MagicLink(application)        # WSGI: Django; Flask — app.wsgi_app = MagicLink(app.wsgi_app)
-    app.add_middleware(MagicLinkASGI)           # ASGI: FastAPI, Starlette; или app = MagicLinkASGI(app)
-    gate = MagicLinkGate()                      # без middleware (Streamlit и т. п.): см. класс MagicLinkGate
+    application = MagicLink(application)        # WSGI: Django; Flask: app.wsgi_app = MagicLink(app.wsgi_app)
+    app.add_middleware(MagicLinkASGI)           # ASGI: FastAPI, Starlette; or app = MagicLinkASGI(app)
+    gate = MagicLinkGate()                      # no middleware (Streamlit etc.): see the MagicLinkGate class
 
-Два способа пустить человека:
-  * Вход по почте — как доступ к Google Doc. Владелец перечисляет адреса в ACCESS_EMAILS. Человек открывает
-    приложение, вводит свою почту и получает письмо со ссылкой для входа (15 минут, один раз). Войти может
-    только тот, кто читает эту почту; браузер помнит вход 30 дней. Незнакомый адрес — это запрос доступа.
-  * Ссылка-приглашение https://<app>/?token=<токен> (ACCESS_TOKEN): middleware ставит куку и перенаправляет
-    на тот же адрес без токена. Ссылка работает как пароль: войдёт любой, кому её переслали.
-Без доступа — страница 403: форма входа по почте (если задан ACCESS_EMAILS) или кнопка «Запросить доступ».
-Страницы и письма — на русском или английском, по языку браузера.
+Two ways to let someone in:
+  * Email sign-in, like sharing a Google Doc. The owner lists addresses in ACCESS_EMAILS. A person opens the
+    app, enters their email and gets a message with a sign-in link (valid for 15 minutes, once). Only someone
+    who reads that inbox can sign in; the browser remembers the sign-in for 30 days. An unknown address is an
+    access request.
+  * Invitation link https://<app>/?token=<token> (ACCESS_TOKEN): the middleware sets a cookie and redirects
+    to the same address without the token. The link works like a password: anyone it is forwarded to gets in.
+Without access: a 403 page with an email sign-in form (if ACCESS_EMAILS is set) or a "Request access" button.
+Pages and emails are in Russian or English, depending on the browser language.
 
-Переменные окружения:
-    ACCESS_EMAILS       адреса через запятую; "@company.com" — весь домен. Убрали адрес — вход перестаёт
-                        работать сразу, в том числе по уже выданной куке.
-    SESSION_SECRET      ключ подписи ссылок для входа и сессий (small создаёт его сам). Не задан — случайный
-                        на каждый запуск: после перезапуска всем придётся войти заново.
-    RESEND_API_KEY      отправлять письма через Resend (HTTPS — работает и на Railway Hobby);
-    MAIL_FROM           отправитель, например "Reports <noreply@company.com>" (домен подтверждён в Resend)
-    SMTP_URL            smtp://логин:пароль@сервер:587 или smtps://...:465 (на Railway SMTP — только с тарифа Pro)
-    LOGIN_LINKS_TO_LOG  1 — не слать письма, а писать ссылку для входа в лог. Только для проверки.
-    PUBLIC_URL          адрес приложения для ссылок в письмах (например, свой домен). Не задан — берётся
-                        RAILWAY_PUBLIC_DOMAIN; локально — localhost.
-    ACCESS_LANG         язык страниц и писем: ru, en или auto (по умолчанию — по заголовку Accept-Language)
-    OWNER_LANG          язык сообщений для владельца — строк лога и уведомлений в Telegram: en (по умолчанию) или ru.
-                        small deploy задаёт его по языку small.
-    ACCESS_TOKEN        токены ссылок-приглашений через запятую, можно с именами: "alice:токен1,bob:токен2".
-                        Убрали чей-то токен — его ссылка и выданные по ней куки перестают работать.
-    ACCESS_REQUEST_URL  куда ведёт кнопка «Запросить доступ» (mailto:..., https://t.me/...), если нет входа по
-                        почте. Не задан — запрос печатается в лог строкой [access-request]
+Environment variables:
+    ACCESS_EMAILS       comma-separated addresses; "@company.com" means the whole domain. Remove an address and
+                        sign-in stops working immediately, including with a cookie already issued.
+    SESSION_SECRET      key that signs sign-in links and sessions (small generates it). If unset, a random one is
+                        made on every start: after a restart everyone has to sign in again.
+    RESEND_API_KEY      send email through Resend (HTTPS, so it works on Railway Hobby too);
+    MAIL_FROM           sender, e.g. "Reports <noreply@company.com>" (the domain must be verified in Resend)
+    SMTP_URL            smtp://user:password@host:587 or smtps://...:465 (Railway allows SMTP only from the Pro plan)
+    LOGIN_LINKS_TO_LOG  1: don't send email, write the sign-in link to the log instead. For testing only.
+    PUBLIC_URL          app address used in email links (e.g. your own domain). If unset, RAILWAY_PUBLIC_DOMAIN
+                        is used; locally, localhost.
+    ACCESS_LANG         language of pages and emails: ru, en or auto (default: from the Accept-Language header)
+    OWNER_LANG          language of messages for the owner (log lines and Telegram notifications): en (default) or
+                        ru. small deploy sets it to match small's language.
+    ACCESS_TOKEN        comma-separated invitation-link tokens, optionally named: "alice:token1,bob:token2".
+                        Remove someone's token and their link, plus any cookies issued through it, stop working.
+    ACCESS_REQUEST_URL  where the "Request access" button leads (mailto:..., https://t.me/...) when there is no
+                        email sign-in. If unset, the request is printed to the log as an [access-request] line
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-                        запросы доступа приходят владельцу в Telegram (подключить: small notify telegram)
+                        access requests reach the owner in Telegram (set up with: small notify telegram)
 """
 
 import base64
@@ -61,14 +62,14 @@ REQUEST_PATH = "/_access/request"
 LOGIN_PATH = "/_access/login"
 VERIFY_PATH = "/_access/verify"
 LOGOUT_PATH = "/_access/logout"
-# Сколько писем для входа можно запросить за 15 минут: на один адрес и с одного IP.
+# How many sign-in emails can be requested within 15 minutes: per address and per IP.
 LIMIT_PER_EMAIL, LIMIT_PER_IP, LIMIT_WINDOW = 3, 10, 15 * 60
 
 EMAIL_RE = re.compile(r"^[^@\s,;<>\"']+@[^@\s,;<>\"']+\.[^@\s,;<>\"']+$")
 DOMAIN_RE = re.compile(r"^@[^@\s,;<>\"']+\.[^@\s,;<>\"']+$")
 STATUS = {200: "200 OK", 302: "302 Found", 400: "400 Bad Request", 403: "403 Forbidden", 429: "429 Too Many Requests"}
 LANGS = ("ru", "en")
-DEFAULT_LANG = "ru"  # если браузер не сказал, какой язык предпочитает
+DEFAULT_LANG = "ru"  # when the browser doesn't say which language it prefers
 
 MESSAGES = {
     "ru": {
@@ -126,7 +127,7 @@ UI = {
 
 
 def parse_tokens(value):
-    """"alice:tok1, tok2" -> [("alice", "tok1"), ("", "tok2")]. В самом токене двоеточия быть не должно."""
+    """"alice:tok1, tok2" -> [("alice", "tok1"), ("", "tok2")]. The token itself must not contain a colon."""
     items = value.split(",") if isinstance(value, str) else value
     entries = []
     for item in items:
@@ -137,7 +138,7 @@ def parse_tokens(value):
 
 
 def parse_emails(value):
-    """"Ivan@Company.com, @team.com, мусор" -> {"ivan@company.com", "@team.com"}: адреса и домены, без регистра."""
+    """"Ivan@Company.com, @team.com, junk" -> {"ivan@company.com", "@team.com"}: addresses and domains, lowercased."""
     items = value.split(",") if isinstance(value, str) else value
     found = set()
     for item in items:
@@ -148,16 +149,16 @@ def parse_emails(value):
 
 
 def pick_lang(accept_language, setting="auto"):
-    """Язык страницы: ACCESS_LANG (ru/en), иначе самый предпочтительный из ru/en в Accept-Language."""
+    """Page language: ACCESS_LANG (ru/en), otherwise whichever of ru/en Accept-Language prefers most."""
     if setting in LANGS:
         return setting
     if not (accept_language or "").strip():
         return DEFAULT_LANG
-    best, best_q = "en", -1.0  # браузер просит другой язык (de, fr…) — английский понятнее, чем русский
+    best, best_q = "en", -1.0  # browser wants some other language (de, fr...): English is a safer bet than Russian
     for part in (accept_language or "").split(","):
         tag, _, params = part.strip().partition(";")
         base = tag.strip().lower().split("-")[0]
-        if base == "*":  # «любой язык» (так, например, пишет fetch в Node)
+        if base == "*":  # "any language" (Node's fetch sends this, for example)
             base = DEFAULT_LANG
         try:
             q = float(params.strip()[2:]) if params.strip().startswith("q=") else 1.0
@@ -169,7 +170,7 @@ def pick_lang(accept_language, setting="auto"):
 
 
 class _Gate:
-    """Общая логика WSGI- и ASGI-версий: кто может войти, куки, письма, страницы, логи."""
+    """Logic shared by the WSGI and ASGI versions: who may get in, cookies, emails, pages, logs."""
 
     def __init__(self, tokens, request_url, cookie_name, max_age, emails=None, secret=None):
         self.entries = parse_tokens(os.environ.get("ACCESS_TOKEN", "") if tokens is None else tokens)
@@ -185,8 +186,8 @@ class _Gate:
         self.telegram = (os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(), os.environ.get("TELEGRAM_CHAT_ID", "").strip())
         self.lang = os.environ.get("ACCESS_LANG", "auto").strip().lower()
         self.max_age = max_age
-        self.used_links = {}  # одноразовые ссылки для входа: nonce -> срок
-        self.attempts = {}  # ограничение частоты писем: ключ -> [время запросов]
+        self.used_links = {}  # one-time sign-in links: nonce -> expiry
+        self.attempts = {}  # email rate limiting: key -> [request times]
         self.lock = threading.Lock()
         if not self.entries and not self.emails:
             _log(_for_owner("[magic-link] neither ACCESS_TOKEN nor ACCESS_EMAILS is set: nobody can get in",
@@ -197,7 +198,7 @@ class _Gate:
                         "[magic-link] почта не настроена (RESEND_API_KEY или SMTP_URL): письма для входа не уйдут. "
                         "Подключить: small mail"))
 
-    # --- общий обработчик: None — пропустить в приложение, иначе (код, заголовки, тело) ---
+    # --- shared handler: None means pass the request to the app, otherwise (status, headers, body) ---
 
     def wants_body(self, method, path):
         return method == "POST" and ((path == REQUEST_PATH and not self.request_url)
@@ -236,14 +237,14 @@ class _Gate:
                         ("Referrer-Policy", "no-referrer"), ("Content-Language", lang)] + list(headers), \
             self.page(kind, base, lang=lang, **page)
 
-    # --- ссылки-приглашения (ACCESS_TOKEN) ---
+    # --- invitation links (ACCESS_TOKEN) ---
 
     def token_owner(self, token):
-        """Имя владельца токена ("" — без имени) или None, если токен неверный."""
+        """Name of the token's owner ("" if unnamed), or None if the token is wrong."""
         return _owner(token, self.entries)
 
     def cookie_owner(self, cookie_header):
-        """Кто вошёл: имя из ACCESS_TOKEN ("" — без имени), адрес почты или None."""
+        """Who is signed in: a name from ACCESS_TOKEN ("" if unnamed), an email address, or None."""
         try:
             morsel = SimpleCookie(cookie_header or "").get(self.cookie_name)
         except CookieError:
@@ -251,7 +252,7 @@ class _Gate:
         return None if morsel is None else self.session_owner(morsel.value)
 
     def session_owner(self, value):
-        """То же по значению куки: "e.<подпись>" — сессия входа по почте, иначе производное от токена."""
+        """Same, by cookie value: "e.<signed>" is an email sign-in session, anything else is derived from a token."""
         value = value if isinstance(value, str) else ""
         if value.startswith("e."):
             data = self.unsign("session", value[2:])
@@ -268,13 +269,13 @@ class _Gate:
 
     @staticmethod
     def location(path_bytes, query):
-        # Убираем токен из адреса, чтобы он не оставался в истории браузера и не утекал через Referer.
-        # Ведущие слэши схлопываем: Location "//host" был бы открытым редиректом.
+        # Strip the token from the URL so it doesn't stay in browser history or leak through Referer.
+        # Collapse leading slashes: a Location of "//host" would be an open redirect.
         location = "/" + quote(path_bytes, safe="/").lstrip("/")
         rest = urlencode([(k, v) for k, v in query if k != "token"])
         return location + ("?" + rest if rest else "")
 
-    # --- вход по почте (ACCESS_EMAILS) ---
+    # --- email sign-in (ACCESS_EMAILS) ---
 
     def email_allowed(self, email):
         email = email.lower()
@@ -285,7 +286,7 @@ class _Gate:
         return payload + "." + self._mac(purpose, payload)
 
     def unsign(self, purpose, value):
-        """Данные из подписанной строки, если подпись верна и срок не вышел; иначе None."""
+        """Data from a signed string if the signature is valid and it hasn't expired; otherwise None."""
         payload, _, mac = (value or "").partition(".")
         if not payload or not hmac.compare_digest(mac.encode("ascii", "replace"), self._mac(purpose, payload).encode()):
             return None
@@ -298,7 +299,7 @@ class _Gate:
         return data
 
     def _mac(self, purpose, payload):
-        # purpose разводит ссылку для входа и сессию: одну нельзя выдать за другую.
+        # purpose keeps sign-in links and sessions apart: one can't be passed off as the other.
         return _b64(hmac.new(self.secret, (purpose + "|" + payload).encode("utf-8"), hashlib.sha256).digest())
 
     def login_request(self, body, ip, user_agent, host, https, base, lang=DEFAULT_LANG):
@@ -307,8 +308,8 @@ class _Gate:
         return self.respond({"bad_email": 400, "slow": 429}.get(kind, 200), kind, base, lang=lang)
 
     def start_login(self, email, ip, user_agent, host, https, base, lang, path):
-        """Письмо со ссылкой для входа на страницу path. Итог: "check" — одинаковый для известных и неизвестных
-        адресов (неизвестный — это запрос доступа), "bad_email" или "slow" (превышен лимит писем)."""
+        """Email a sign-in link to the page at path. Result: "check" (the same for known and unknown addresses;
+        an unknown one is an access request), "bad_email" or "slow" (email limit exceeded)."""
         email = (email if isinstance(email, str) else "").strip().lower()[:254]
         if not EMAIL_RE.match(email):
             return "bad_email"
@@ -321,7 +322,7 @@ class _Gate:
                             "[magic-link] письмо для входа не отправлено: неизвестен адрес приложения. Задайте PUBLIC_URL"))
             else:
                 link = self.login_link(app_url + path, email)
-                # В фоне: ответ не ждёт почту и одинаков для известных и неизвестных адресов.
+                # In the background, so the response doesn't wait for mail and looks the same for unknown addresses.
                 threading.Thread(target=_send_login_mail, args=(email, link, urlsplit(app_url).netloc, lang),
                                  daemon=True).start()
         else:
@@ -329,12 +330,12 @@ class _Gate:
         return "check"
 
     def login_link(self, url, email):
-        """Одноразовая ссылка для входа: действует LINK_TTL секунд."""
+        """One-time sign-in link, valid for LINK_TTL seconds."""
         return url + "?" + urlencode({"t": self.sign("login", {
             "e": email, "x": int(time.time()) + LINK_TTL, "n": secrets.token_urlsafe(9)})})
 
     def login_data(self, token):
-        """Данные действующей ссылки для входа (подпись верна, срок не вышел, адрес в списке, ещё не использована)."""
+        """Data of a valid sign-in link (signature valid, not expired, address on the list, not used yet)."""
         data = self.unsign("login", token if isinstance(token, str) else "")
         email = data.get("e") if data else None
         if not (isinstance(email, str) and email and self.email_allowed(email) and data.get("n") not in self.used_links):
@@ -342,7 +343,7 @@ class _Gate:
         return data
 
     def use_login(self, token, ip):
-        """Тратит ссылку для входа: значение куки сессии "e.<подпись>" или None, если ссылка не годится."""
+        """Use up a sign-in link: the session cookie value "e.<signed>", or None if the link is no good."""
         data = self.login_data(token)
         if data is None:
             return None
@@ -363,7 +364,7 @@ class _Gate:
         if data is None:
             return self.respond(403, "expired", base, lang=lang)
         if method != "POST":
-            # Почтовые сканеры сами открывают ссылки из писем. Вход — только по кнопке, иначе сканер «потратит» ссылку.
+            # Mail scanners open emailed links on their own. Sign in only by button, or a scanner would use up the link.
             return self.respond(200, "confirm", base, lang=lang, email=data["e"], token=token)
         session = self.use_login(token, ip)
         if session is None:
@@ -372,8 +373,8 @@ class _Gate:
                      ("Cache-Control", "no-store")], b""
 
     def public_url(self, host, https, base):
-        """Адрес приложения для ссылки в письме. Заголовку Host верим только локально: иначе злоумышленник
-        подставил бы свой домен, и ссылка для входа из настоящего письма ушла бы к нему."""
+        """App address for the link in the email. The Host header is trusted only locally: otherwise an attacker
+        could substitute their own domain, and the sign-in link from a genuine email would go to them."""
         explicit = os.environ.get("PUBLIC_URL", "").strip().rstrip("/")
         if explicit:
             return explicit
@@ -397,7 +398,7 @@ class _Gate:
             self.attempts[key] = recent + [now]
             return True
 
-    # --- страницы и журнал ---
+    # --- pages and logging ---
 
     def page(self, kind, base, email="", token="", lang=DEFAULT_LANG):
         if kind == "forbidden" and self.emails:
@@ -428,7 +429,7 @@ class _Gate:
         self.notify_request(contact, ip, user_agent, host)
 
     def notify_request(self, contact, ip, user_agent, host=""):
-        # repr() экранирует переводы строк: пользователь не сможет подделать строки лога.
+        # repr() escapes newlines, so a user can't forge log lines.
         _log("[access-request] contact=%r ip=%s ua=%r" % (contact, ip, user_agent[:200]))
         token, chat = self.telegram
         if token and chat:
@@ -436,7 +437,7 @@ class _Gate:
             text = _for_owner("🔑 Access request to %s\nContact: %s\nIP: %s\n\nGrant access: %s",
                           "🔑 Запрос доступа к %s\nКонтакт: %s\nIP: %s\n\nВыдать доступ: %s") % (
                 host or _for_owner("the app", "приложению"), contact or "—", ip or "—", hint)
-            # В фоне: пользователь не ждёт Telegram. Без parse_mode — текст из формы ничего не разметит.
+            # In the background: the user doesn't wait for Telegram. No parse_mode, so form text can't add markup.
             threading.Thread(target=_send_telegram, args=(token, chat, text), daemon=True).start()
 
     @staticmethod
@@ -446,7 +447,7 @@ class _Gate:
 
 
 class MagicLink:
-    """WSGI-middleware."""
+    """WSGI middleware."""
 
     def __init__(self, app, tokens=None, request_url=None, cookie_name=COOKIE_NAME, max_age=COOKIE_MAX_AGE,
                  emails=None, secret=None):
@@ -480,7 +481,7 @@ class MagicLink:
 
 
 class MagicLinkASGI:
-    """ASGI-middleware (FastAPI, Starlette, Litestar...). Websocket без доступа закрывается до accept (403)."""
+    """ASGI middleware (FastAPI, Starlette, Litestar...). A websocket without access is closed before accept (403)."""
 
     def __init__(self, app, tokens=None, request_url=None, cookie_name=COOKIE_NAME, max_age=COOKIE_MAX_AGE,
                  emails=None, secret=None):
@@ -488,7 +489,7 @@ class MagicLinkASGI:
         self.gate = _Gate(tokens, request_url, cookie_name, max_age, emails, secret)
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] not in ("http", "websocket"):  # lifespan и прочее — без проверки
+        if scope["type"] not in ("http", "websocket"):  # lifespan and the rest: no check
             return await self.app(scope, receive, send)
         gate = self.gate
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
@@ -525,20 +526,20 @@ class MagicLinkASGI:
 
 
 class MagicLinkGate:
-    """Та же защита для фреймворков, которые нельзя обернуть middleware (например, Streamlit).
+    """The same protection for frameworks that can't be wrapped in middleware (e.g. Streamlit).
 
-    Те же переменные окружения, подписи, одноразовые ссылки, лимиты писем, журнал и тексты, что у MagicLink, но без
-    HTTP: формы показывает само приложение, и куку сессии (gate.cookie_name) оно же ставит и читает. Создавайте один
-    объект на процесс — в нём хранятся использованные ссылки и счётчики писем.
+    Same environment variables, signatures, one-time links, email limits, logging and texts as MagicLink, but no
+    HTTP: the app shows the forms itself, and it sets and reads the session cookie (gate.cookie_name) itself. Create
+    one object per process: it holds the used links and the email counters.
 
         gate = MagicLinkGate()
-        gate.session_owner(cookie_value)       # кто вошёл по значению куки: адрес, имя из ACCESS_TOKEN или None
-        gate.token_login(token, headers)       # ?token=: имя ("" — общая ссылка) или None
-        gate.start_login(email, headers)       # письмо со ссылкой ?t=: "check" для любого адреса, "bad_email", "slow"
-        gate.login_email(t)                    # кому выдана ссылка ?t= (ссылку не тратит) или None
-        gate.finish_login(t, headers)          # только по нажатию кнопки: тратит ссылку, значение куки или None
-        gate.request_access(contact, headers)  # запрос доступа: в лог и в Telegram
-    headers — заголовки запроса (любой Mapping, регистр не важен): из них берутся IP, Host, User-Agent и язык.
+        gate.session_owner(cookie_value)       # who is signed in, by cookie value: address, ACCESS_TOKEN name or None
+        gate.token_login(token, headers)       # ?token=: name ("" for a shared link) or None
+        gate.start_login(email, headers)       # emails a ?t= link: "check" for any address, "bad_email", "slow"
+        gate.login_email(t)                    # who the ?t= link was issued to (doesn't use it up), or None
+        gate.finish_login(t, headers)          # only on a button press: uses up the link; cookie value or None
+        gate.request_access(contact, headers)  # access request: to the log and to Telegram
+    headers: the request headers (any Mapping, case-insensitive); IP, Host, User-Agent and language come from them.
     """
 
     def __init__(self, tokens=None, request_url=None, cookie_name=COOKIE_NAME, max_age=COOKIE_MAX_AGE,
@@ -548,64 +549,64 @@ class MagicLinkGate:
 
     @property
     def emails(self):
-        """Адреса и домены из ACCESS_EMAILS. Пусто — входа по почте нет."""
+        """Addresses and domains from ACCESS_EMAILS. Empty means no email sign-in."""
         return frozenset(self._gate.emails)
 
     @property
     def request_url(self):
-        """ACCESS_REQUEST_URL: куда ведёт кнопка «Запросить доступ»; "" — встроенная форма запроса."""
+        """ACCESS_REQUEST_URL: where the "Request access" button leads; "" means the built-in request form."""
         return self._gate.request_url
 
     def lang(self, headers=None):
-        """Язык посетителя: ACCESS_LANG, иначе по Accept-Language — "ru" или "en"."""
+        """Visitor's language: ACCESS_LANG, otherwise from Accept-Language; "ru" or "en"."""
         return pick_lang(_header(headers, "accept-language"), self._gate.lang)
 
     @staticmethod
     def text(kind, lang, email=""):
-        """(значок, заголовок, текст) из MESSAGES — обычным текстом, без HTML-сущностей."""
+        """(icon, title, text) from MESSAGES as plain text, without HTML entities."""
         icon, title, text = MESSAGES[lang if lang in MESSAGES else DEFAULT_LANG][kind]
         return html.unescape(icon), title, (text % email if kind == "confirm" else text)
 
     @staticmethod
     def label(name, lang):
-        """Подпись кнопки или поля из UI: "request", "contact", "get_link", "sign_in", "other"."""
+        """Button or field label from UI: "request", "contact", "get_link", "sign_in", "other"."""
         return UI[lang if lang in UI else DEFAULT_LANG][name]
 
     def token_login(self, token, headers=None):
-        """Вход по ссылке-приглашению ?token=: имя из ACCESS_TOKEN ("" — без имени) или None. Вход пишется в лог."""
+        """Sign in with an invitation link ?token=: the ACCESS_TOKEN name ("" if unnamed) or None. Logs the sign-in."""
         name = self._gate.token_owner(token if isinstance(token, str) else "")
         if name is not None:
             self._gate.log_login(name, _request_info(headers)[0])
         return name
 
     def session_owner(self, value):
-        """Кто вошёл по значению куки gate.cookie_name: адрес почты, имя из ACCESS_TOKEN или None. Убрали адрес из
-        ACCESS_EMAILS или сменили SESSION_SECRET — сессия больше не подходит."""
+        """Who is signed in, by the value of the gate.cookie_name cookie: email address, ACCESS_TOKEN name or None.
+        Removing the address from ACCESS_EMAILS or changing SESSION_SECRET invalidates the session."""
         return self._gate.session_owner(value)
 
     def start_login(self, email, headers=None, path="/"):
-        """Отправляет письмо со ссылкой <адрес приложения><path>?t=... Адрес берётся из PUBLIC_URL или
-        RAILWAY_PUBLIC_DOMAIN, заголовку Host верим только для localhost. Итог: "check" — одинаковый для известных
-        и неизвестных адресов (неизвестный становится запросом доступа), "bad_email" или "slow"."""
+        """Send an email with the link <app address><path>?t=... The address comes from PUBLIC_URL or
+        RAILWAY_PUBLIC_DOMAIN; the Host header is trusted only for localhost. Result: "check" (the same for known
+        and unknown addresses; an unknown one becomes an access request), "bad_email" or "slow"."""
         ip, user_agent, host, https = _request_info(headers)
         return self._gate.start_login(email, ip, user_agent, host, https, "", self.lang(headers), path)
 
     def login_link(self, email, app_url, path="/"):
-        """Ссылка для входа без письма (для проверок и своих способов доставки): <app_url><path>?t=..."""
+        """A sign-in link without the email (for tests and custom delivery): <app_url><path>?t=..."""
         return self._gate.login_link(app_url.rstrip("/") + path, email.strip().lower())
 
     def login_email(self, token):
-        """Адрес из действующей ссылки для входа или None. Ссылку не тратит: её открывают и почтовые сканеры,
-        поэтому вход — только по кнопке (finish_login)."""
+        """Address from a valid sign-in link, or None. Doesn't use up the link: mail scanners open it too,
+        so sign-in happens only on a button press (finish_login)."""
         data = self._gate.login_data(token)
         return data["e"] if data else None
 
     def finish_login(self, token, headers=None):
-        """Тратит ссылку для входа (один раз, под замком): значение куки сессии или None. Вход пишется в лог."""
+        """Use up the sign-in link (once, under a lock): the session cookie value or None. Logs the sign-in."""
         return self._gate.use_login(token, _request_info(headers)[0])
 
     def request_access(self, contact, headers=None):
-        """Запрос доступа: строка [access-request] в лог (repr — строки лога не подделать) и сообщение в Telegram."""
+        """Access request: an [access-request] log line (repr, so log lines can't be forged) and a Telegram message."""
         ip, user_agent, host, _ = _request_info(headers)
         self._gate.notify_request((contact if isinstance(contact, str) else "").strip()[:200], ip, user_agent, host)
 
@@ -618,7 +619,7 @@ def _header(headers, name):
 
 
 def _request_info(headers):
-    """(ip, user_agent, host, https) из заголовков запроса — для MagicLinkGate."""
+    """(ip, user_agent, host, https) from the request headers, for MagicLinkGate."""
     return (_client_ip(_header(headers, "x-forwarded-for"), ""), _header(headers, "user-agent"),
             _header(headers, "host"), _is_https(_header(headers, "x-forwarded-proto"), None))
 
@@ -632,7 +633,8 @@ def _owner(value, entries):
 
 
 def _cookie_value(token):
-    # В куке лежит не сам токен, а производное от него: убрали токен из ACCESS_TOKEN — его куки больше не подходят.
+    # The cookie holds a value derived from the token, not the token itself: remove the token from ACCESS_TOKEN
+    # and its cookies stop working.
     return hmac.new(token.encode("utf-8"), b"magic-link-cookie", hashlib.sha256).hexdigest()
 
 
@@ -656,7 +658,7 @@ def _is_https(forwarded_proto, scheme):
 
 
 def _mail_mode():
-    """Чем отправлять письма для входа: "log", "resend", "smtp" или "" — не настроено."""
+    """How to send sign-in emails: "log", "resend", "smtp" or "" (not set up)."""
     if os.environ.get("LOGIN_LINKS_TO_LOG", "").strip().lower() in ("1", "true", "yes"):
         return "log"
     if os.environ.get("RESEND_API_KEY", "").strip():
@@ -677,13 +679,13 @@ def _send_login_mail(email, link, app_name, lang=DEFAULT_LANG):
     try:
         send_mail(email, ui["subject"] % app_name, ui["mail_text"] % (app_name, link), body)
         _log(_for_owner("[magic-link] sign-in email sent: %s", "[magic-link] письмо для входа отправлено: %s") % email)
-    except Exception as e:  # письмо — не повод ронять приложение; ключи и пароли в лог не пишем
+    except Exception as e:  # a failed email is no reason to crash the app; keys and passwords stay out of the log
         _log(_for_owner("[magic-link] could not send the sign-in email to %s: %s",
                     "[magic-link] не удалось отправить письмо для входа на %s: %s") % (email, _describe(e)))
 
 
 def send_mail(to, subject, text, html_body):
-    """Письмо через Resend (RESEND_API_KEY) или SMTP (SMTP_URL). Ошибка — исключение."""
+    """Send an email through Resend (RESEND_API_KEY) or SMTP (SMTP_URL). Raises on failure."""
     sender = os.environ.get("MAIL_FROM", "").strip()
     key = os.environ.get("RESEND_API_KEY", "").strip()
     smtp_url = os.environ.get("SMTP_URL", "").strip()
@@ -734,13 +736,13 @@ def _send_telegram(token, chat, text):
                                      data=json.dumps({"chat_id": chat, "text": text}).encode("utf-8"))
     try:
         urllib.request.urlopen(request, timeout=10).close()
-    except Exception as e:  # уведомление — не повод ронять запрос; токен бота в лог не пишем
+    except Exception as e:  # a failed notification is no reason to fail the request; the bot token stays out of the log
         _log(_for_owner("[magic-link] could not send the access request to Telegram: %s",
                     "[magic-link] не удалось отправить запрос доступа в Telegram: %s") % type(e).__name__)
 
 
 def _for_owner(en, ru):
-    """Текст для владельца (лог, Telegram) — на его языке, OWNER_LANG. Посетитель видит язык своего браузера."""
+    """Text for the owner (log, Telegram) in their language, OWNER_LANG. Visitors see their browser's language."""
     return ru if os.environ.get("OWNER_LANG", "").strip().lower()[:2] == "ru" else en
 
 

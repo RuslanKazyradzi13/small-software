@@ -1,5 +1,5 @@
-"""small sleep: режим serverless Railway — без запросов приложение засыпает и не тратит ресурсы,
-первый запрос его будит (несколько секунд задержки)."""
+"""small sleep: Railway's serverless mode — with no requests the app falls asleep and uses no resources,
+the first request wakes it up (a few seconds of delay)."""
 
 import argparse
 

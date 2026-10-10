@@ -1,7 +1,7 @@
-"""Вход по рабочей почте в шаблоне streamlit: require_access() в app.py поверх MagicLinkGate из magic_link.py.
+"""Work email sign-in in the streamlit template: require_access() in app.py on top of MagicLinkGate from magic_link.py.
 
-Запуск: python -m unittest discover -s tests. Тесты на настоящем Streamlit (streamlit.testing.v1.AppTest) пропускаются,
-если он не установлен: pip install "streamlit>=1.40,<2".
+Run: python -m unittest discover -s tests. Tests on real Streamlit (streamlit.testing.v1.AppTest) are skipped
+if it isn't installed: pip install "streamlit>=1.40,<2".
 """
 
 import contextlib
@@ -26,7 +26,7 @@ from test_small import TOKEN, MockRailway, run
 
 HAS_STREAMLIT = importlib.util.find_spec("streamlit") is not None
 needs_streamlit = unittest.skipUnless(HAS_STREAMLIT, "streamlit не установлен")
-MAGIC_LINK_DIR = Path(__file__).resolve().parents[2] / "magic-link"  # исходники middleware
+MAGIC_LINK_DIR = Path(__file__).resolve().parents[2] / "magic-link"  # middleware sources
 
 EMAILS = "ivan@company.com, @team.com"
 SECRET = "streamlit-test-secret"
@@ -56,9 +56,9 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.cookies, self.headers, self.log, self.sent = {}, {}, "", []
         if HAS_STREAMLIT:
             import streamlit as st
-            st.cache_resource.clear()  # новый MagicLinkGate: использованные ссылки и лимиты писем — с нуля
+            st.cache_resource.clear()  # a new MagicLinkGate: used links and email limits start from scratch
 
-    # --- без Streamlit: small init, deploy, access ---
+    # --- without Streamlit: small init, deploy, access ---
 
     def test_init_includes_magic_link(self):
         self.assertEqual(sorted(os.listdir(self.app)),
@@ -99,9 +99,9 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"],
                          {"ACCESS_EMAILS": "ivan@company.com", "SESSION_SECRET": env["SESSION_SECRET"],
                           "PUBLIC_URL": "https://" + DOMAIN})
-        self.assertEqual(out, "")  # никаких ссылок-паролей: человек входит своей почтой
+        self.assertEqual(out, "")  # no password-like links: people sign in with their own email
         self.assertIn("https://%s/" % DOMAIN, err)
-        if HAS_STREAMLIT:  # и приложение с этими переменными показывает форму входа по почте
+        if HAS_STREAMLIT:  # and the app with these variables shows the email sign-in form
             self.environ.update(ACCESS_EMAILS=env["ACCESS_EMAILS"], SESSION_SECRET=env["SESSION_SECRET"])
             at = self.open()
             self.assertIn("Вход по рабочей почте", at.markdown[0].value)
@@ -129,10 +129,10 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.assertIn("magic_link.py", err)
         self.assertNotIn("ACCESS_EMAILS", load_config(Path(self.app, "small.json"))["env"])
 
-    # --- ниже — на настоящем Streamlit ---
+    # --- below: on real Streamlit ---
 
     def magic_link(self):
-        """Модуль magic_link — тот же объект, которым пользуется app.py (тот же sys.modules)."""
+        """The magic_link module: the same object app.py uses (the same sys.modules)."""
         if "magic_link" not in sys.modules:
             sys.path.insert(0, self.app)
             try:
@@ -142,7 +142,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         return sys.modules["magic_link"]
 
     def helper(self, secret=SECRET, emails=EMAILS):
-        """MagicLinkGate теста: подписывает ссылки тем же SESSION_SECRET, что у приложения."""
+        """The test's MagicLinkGate: signs links with the same SESSION_SECRET as the app."""
         with contextlib.redirect_stdout(io.StringIO()):
             return self.magic_link().MagicLinkGate(tokens="", request_url="", emails=emails, secret=secret)
 
@@ -155,7 +155,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
             return helper.finish_login(token_of(helper.login_link(email, "https://" + DOMAIN)))
 
     def capture_mail(self):
-        """Письма не уходят: _send_login_mail перехвачен, тест читает ссылку из self.sent."""
+        """Emails don't go out: _send_login_mail is intercepted, the test reads the link from self.sent."""
         patcher = mock.patch.object(self.magic_link(), "_send_login_mail",
                                     side_effect=lambda *args: self.sent.append(args))
         patcher.start()
@@ -169,7 +169,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
 
     @contextlib.contextmanager
     def patched(self):
-        """Окружение приложения; куки и заголовки запроса — подменой st.context (AppTest их не задаёт)."""
+        """The app's environment; request cookies and headers via patched st.context (AppTest doesn't set them)."""
         from streamlit.runtime.context import ContextProxy
         out = io.StringIO()
         with mock.patch.dict(os.environ, self.environ), \
@@ -182,14 +182,14 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.log += out.getvalue()
 
     def go(self, runnable):
-        """Запуск AppTest (или виджета после click()/input()) в окружении приложения."""
+        """Runs AppTest (or a widget after click()/input()) in the app's environment."""
         with self.patched():
             at = runnable.run()
         self.assertFalse(at.exception, [e.value for e in at.exception])
         return at
 
     def open(self, **query):
-        """Открыть приложение в новой вкладке (новая сессия Streamlit) с параметрами адреса."""
+        """Opens the app in a new tab (a new Streamlit session) with URL parameters."""
         from streamlit.testing.v1 import AppTest
         at = AppTest.from_file(os.path.join(self.app, "app.py"), default_timeout=30)
         for key, value in query.items():
@@ -198,7 +198,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
 
     @staticmethod
     def frames(at):
-        """HTML невидимых iframe, которые пишут куку."""
+        """HTML of the invisible iframes that write the cookie."""
         return [node.proto.srcdoc for node in at.get("iframe")]
 
     @staticmethod
@@ -213,7 +213,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.assertIn(heading, at.markdown[0].value)
         self.assertEqual(self.labels(at.text_input), ["Рабочая почта"])
         self.assertEqual(self.labels(at.button), ["Получить ссылку для входа"])
-        self.assertEqual(len(at.title), 0)  # интерфейс приложения не показан
+        self.assertEqual(len(at.title), 0)  # the app's UI is not shown
 
     def ask(self, email):
         at = self.open()
@@ -221,7 +221,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         return self.go(at.button[0].click())
 
     def sign_in(self, token):
-        """Открыть ссылку из письма и нажать «Войти»."""
+        """Opens the link from the email and clicks "Sign in"."""
         at = self.open(t=token)
         self.assertEqual(self.labels(at.button), ["Войти"])
         return self.go(at.button[0].click())
@@ -235,7 +235,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.assertEqual((self.labels(at.text_input), self.labels(at.button)),
                          (["Work email"], ["Email me a sign-in link"]))
         self.headers = {}
-        self.environ["ACCESS_LANG"] = "en"  # ACCESS_LANG сильнее браузера
+        self.environ["ACCESS_LANG"] = "en"  # ACCESS_LANG beats the browser
         self.assertIn("Sign in with your work email", self.open().markdown[0].value)
 
     @needs_streamlit
@@ -247,16 +247,16 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.assertEqual(self.labels(known.button), ["Ввести другой адрес"])
         email, link, app_name, lang = self.wait_mail()
         self.assertEqual((email, app_name, lang), ("ivan@company.com", DOMAIN, "ru"))
-        self.assertTrue(link.startswith("https://%s/?t=" % DOMAIN), link)  # не Host из запроса
+        self.assertTrue(link.startswith("https://%s/?t=" % DOMAIN), link)  # not the Host from the request
 
         unknown = self.ask("stranger@evil.example")
         self.assertEqual([m.value for m in unknown.markdown], [m.value for m in known.markdown])
         self.assertIn("[access-request] contact='stranger@evil.example' ip=203.0.113.7", self.log)
         time.sleep(0.2)
-        self.assertEqual([m[0] for m in self.sent], ["ivan@company.com"])  # незнакомцу письмо не ушло
-        self.assertNotIn(link, self.log)  # ссылка для входа в лог не попадает
+        self.assertEqual([m[0] for m in self.sent], ["ivan@company.com"])  # no email went to the stranger
+        self.assertNotIn(link, self.log)  # the sign-in link doesn't end up in the log
 
-        again = self.go(known.button[0].click())  # «Ввести другой адрес» — снова форма
+        again = self.go(known.button[0].click())  # "Use a different address" brings the form back
         self.assert_sign_in_screen(again)
 
     @needs_streamlit
@@ -271,24 +271,24 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.assertIn("Слишком много попыток", at.warning[0].value)
         self.wait_mail(3)
         time.sleep(0.2)
-        self.assertEqual([m[0] for m in self.sent], ["ivan@company.com"] * 3)  # 3 письма на адрес за 15 минут
+        self.assertEqual([m[0] for m in self.sent], ["ivan@company.com"] * 3)  # 3 emails per address per 15 minutes
 
     @needs_streamlit
     def test_link_shows_a_button_and_a_click_signs_in(self):
         token = self.login_token("ivan_petrov@team.com")
-        for _ in range(2):  # открытие ссылки (или почтовый сканер) ещё не входит и ссылку не тратит
+        for _ in range(2):  # opening the link (or a mail scanner) doesn't sign in yet and doesn't use up the link
             at = self.open(t=token)
             self.assertIn("Вход в приложение", at.markdown[0].value)
             self.assertEqual(at.markdown[1].value.replace("\\", ""),
                              "Нажмите кнопку, чтобы войти как ivan_petrov@team.com.")
-            self.assertIn("\\_", at.markdown[1].value)  # адрес не превращается в разметку Markdown
+            self.assertIn("\\_", at.markdown[1].value)  # the address doesn't turn into Markdown markup
             self.assertEqual(self.labels(at.button), ["Войти"])
             self.assertEqual((len(at.title), self.frames(at)), (0, []))
 
         self.headers = {"X-Forwarded-For": "203.0.113.7"}
         at = self.go(at.button[0].click())
         self.assert_app(at)
-        self.assertNotIn("t", at.query_params)  # ссылка убрана из адреса
+        self.assertNotIn("t", at.query_params)  # the link is removed from the URL
         self.assertIn("[magic-link] signed in by email (ivan_petrov@team.com), ip=203.0.113.7", self.log)
         [frame] = self.frames(at)
         cookie = re.search(r'"small_access=(e\.[A-Za-z0-9_.-]+); Path=/; Max-Age=2592000; SameSite=Lax"', frame)
@@ -299,17 +299,17 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.assertEqual(at.sidebar.caption[0].value.replace("\\", ""), "Вы вошли как ivan_petrov@team.com")
         self.assertEqual(self.labels(at.sidebar.button), ["Выйти"])
 
-        at = self.go(at.sidebar.slider[0].set_value(300))  # дальше сессия держится, кука уже записана
+        at = self.go(at.sidebar.slider[0].set_value(300))  # the session holds from now on: the cookie is already stored
         self.assert_app(at)
         self.assertEqual(self.frames(at), [])
 
-        self.cookies = {"small_access": cookie.group(1)}  # перезагрузка страницы: браузер прислал куку
+        self.cookies = {"small_access": cookie.group(1)}  # page reload: the browser sent the cookie
         self.assert_app(self.open())
 
     @needs_streamlit
     def test_link_works_only_once(self):
         token = self.login_token()
-        first, second = self.open(t=token), self.open(t=token)  # две вкладки с одной ссылкой
+        first, second = self.open(t=token), self.open(t=token)  # two tabs with the same link
         self.assert_app(self.go(first.button[0].click()))
         at = self.go(second.button[0].click())
         self.assert_sign_in_screen(at, "Ссылка для входа устарела")
@@ -337,11 +337,11 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.cookies = {"small_access": self.session_value()}
         at = self.open()
         self.assert_app(at)
-        self.assertEqual(self.frames(at), [])  # кука уже есть — заново не пишется
+        self.assertEqual(self.frames(at), [])  # the cookie is already there: it isn't written again
 
-        self.environ["ACCESS_EMAILS"] = "@team.com"  # ivan убран из ACCESS_EMAILS
+        self.environ["ACCESS_EMAILS"] = "@team.com"  # ivan is removed from ACCESS_EMAILS
         self.assert_sign_in_screen(self.open())
-        self.environ.update(ACCESS_EMAILS=EMAILS, SESSION_SECRET="rotated-secret")  # сменили SESSION_SECRET
+        self.environ.update(ACCESS_EMAILS=EMAILS, SESSION_SECRET="rotated-secret")  # SESSION_SECRET was changed
         self.assert_sign_in_screen(self.open())
 
         self.environ["SESSION_SECRET"] = SECRET
@@ -360,7 +360,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.assert_sign_in_screen(at, "Вы вышли")
         [frame] = self.frames(at)
         self.assertIn('"small_access=; Path=/; Max-Age=0; SameSite=Lax"', frame)
-        # Браузер прислал куку при открытии страницы, st.context.cookies её ещё помнит — но вход закрыт.
+        # The browser sent the cookie on page load and st.context.cookies still remembers it, but access is closed.
         at = self.go(at)
         self.assert_sign_in_screen(at, "Вы вышли")
         self.assertEqual(self.frames(at), [])
@@ -371,16 +371,16 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.environ["ACCESS_TOKEN"] = "owner-tok,bob:" + self.token
         at = self.open(token=self.token)
         self.assert_app(at)
-        # Как раньше: токен остаётся в адресе (AppTest отдаёт строку, а в Streamlit 1.40 — список).
+        # As before: the token stays in the URL (AppTest returns a string, Streamlit 1.40 a list).
         self.assertIn(at.query_params["token"], (self.token, [self.token]))
-        self.assertEqual((self.labels(at.sidebar.button), self.frames(at)), ([], []))  # без куки и «Выйти»
+        self.assertEqual((self.labels(at.sidebar.button), self.frames(at)), ([], []))  # no cookie and no "Sign out"
         self.assertIn("[magic-link] signed in by link (bob), ip=203.0.113.7", self.log)
-        self.assert_app(self.go(at))  # перерисовка — без повторной проверки
+        self.assert_app(self.go(at))  # a rerun doesn't check again
         self.assertEqual(self.log.count("signed in by link"), 1)
 
         at = self.open(token="wrong")
         self.assertIn("Ссылка недействительна", at.markdown[0].value)
-        self.assertEqual(self.labels(at.button), ["Получить ссылку для входа"])  # и тут же вход по почте
+        self.assertEqual(self.labels(at.button), ["Получить ссылку для входа"])  # and email sign-in right there
 
     @needs_streamlit
     def test_without_access_emails_behaves_as_before(self):
@@ -390,7 +390,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.assertEqual(self.labels(at.button), ["Запросить доступ"])
         self.assertEqual(len(at.title), 0)
         self.cookies = {"small_access": self.session_value()}
-        self.assertEqual(len(self.open().title), 0)  # без ACCESS_EMAILS сессии по почте не действуют
+        self.assertEqual(len(self.open().title), 0)  # without ACCESS_EMAILS email sessions don't work
 
     @needs_streamlit
     def test_login_links_to_log_mode(self):
@@ -399,7 +399,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         at.text_input[0].input("olga@team.com")
         with self.patched() as out:
             at = at.button[0].click().run()
-            deadline = time.monotonic() + 5  # письмо «уходит» в фоне — ждём строку лога
+            deadline = time.monotonic() + 5  # the email "goes out" in the background: wait for the log line
             while "sign-in link" not in out.getvalue() and time.monotonic() < deadline:
                 time.sleep(0.01)
         self.assertIn("Проверьте почту", at.markdown[0].value)
@@ -423,7 +423,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
 
 
 def setUpModule():
-    i18n.use("ru")  # проверки читают русский текст small; язык машины и CI не важен
+    i18n.use("ru")  # the checks read small's Russian text; the machine's and CI's language don't matter
 
 
 def tearDownModule():

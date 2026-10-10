@@ -1,4 +1,4 @@
-"""Тонкий клиент Railway: GraphQL API v2 и загрузка исходников (тот же эндпоинт, что у `railway up`)."""
+"""Thin Railway client: GraphQL API v2 and source upload (the same endpoint as `railway up`)."""
 
 import json
 import os
@@ -21,8 +21,8 @@ class RailwayError(Exception):
 
 
 def token_from_env():
-    """Токен Railway из окружения. Пробелы, кавычки и угловые скобки по краям отбрасываются: в токене их не бывает,
-    а из заготовки вида "<токен>" их легко скопировать вместе со значением."""
+    """The Railway token from the environment. Spaces, quotes and angle brackets at the edges are dropped: a token
+    never contains them, and they are easy to copy along with the value from a placeholder like "<token>"."""
     raw = next((os.environ[v] for v in TOKEN_ENV_VARS if os.environ.get(v)), "")
     return raw.strip().strip("\"'<>").strip() or None
 
@@ -32,7 +32,7 @@ class Railway:
         self.token = token
         self.base_url = (base_url or os.environ.get("SMALL_API_URL") or DEFAULT_API_URL).rstrip("/")
 
-    # --- транспорт ---
+    # --- transport ---
 
     def _post(self, url, body, content_type, timeout=60):
         req = urllib.request.Request(url, data=body, method="POST", headers={
@@ -46,7 +46,7 @@ class Railway:
                 raw = resp.read()
         except urllib.error.HTTPError as e:
             raise RailwayError("HTTP %d: %s" % (e.code, _error_text(e.read()))) from None
-        except OSError as e:  # URLError, таймауты, разрыв соединения
+        except OSError as e:  # URLError, timeouts, dropped connection
             raise RailwayError(tr("cannot reach %s: %s", "нет связи с %s: %s")
                                % (self.base_url, getattr(e, "reason", e))) from None
         try:
@@ -62,10 +62,10 @@ class Railway:
             raise RailwayError("; ".join(e.get("message", "?") for e in res["errors"]))
         return res.get("data") or {}
 
-    # --- операции ---
+    # --- operations ---
 
     def workspaces(self):
-        """Работает только с токеном аккаунта; токен workspace получит ошибку."""
+        """Works only with an account token; a workspace token gets an error."""
         data = self.graphql("query { me { workspaces { id name } } }")
         return data["me"]["workspaces"]
 
@@ -87,7 +87,7 @@ class Railway:
         return project["id"], env["id"]
 
     def find_projects(self, name, workspace_id=None):
-        """Неудалённые проекты с точно таким именем, вместе с окружениями и сервисами."""
+        """Non-deleted projects with exactly this name, together with their environments and services."""
         data = self.graphql(
             """query($workspaceId: String) {
                  projects(workspaceId: $workspaceId, first: 500) { edges { node {
@@ -117,8 +117,8 @@ class Railway:
         return data["serviceCreate"]["id"]
 
     def upsert_variables(self, project_id, environment_id, service_id, variables):
-        """Добавляет/обновляет переменные сервиса одним запросом. Остальные переменные не трогает,
-        повторный деплой не запускает: их подхватит следующая сборка."""
+        """Adds/updates service variables in one request. Leaves other variables alone and does not
+        trigger a redeploy: the next build will pick them up."""
         self.graphql(
             "mutation($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }",
             {"input": {"projectId": project_id, "environmentId": environment_id, "serviceId": service_id,
@@ -126,7 +126,7 @@ class Railway:
         )
 
     def upload(self, project_id, environment_id, service_id, tarball, message=None):
-        """Загружает .tar.gz с кодом и запускает сборку. Возвращает {deploymentId, url, logsUrl, ...}."""
+        """Uploads a .tar.gz with the code and starts a build. Returns {deploymentId, url, logsUrl, ...}."""
         params = {"serviceId": service_id}
         if message:
             params["message"] = message
@@ -180,7 +180,7 @@ class Railway:
         return None
 
     def latest_deployment(self, service_id, environment_id, timeout=60):
-        """{"id", "status", "createdAt"} последнего деплоя сервиса или None, если деплоев не было."""
+        """{"id", "status", "createdAt"} of the service's latest deployment, or None if there were none."""
         data = self.graphql(
             """query($serviceId: String!, $environmentId: String!) {
                  serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
@@ -193,7 +193,7 @@ class Railway:
         return data["serviceInstance"]["latestDeployment"]
 
     def instance_status(self, service_id, environment_id, timeout=60):
-        """{"sleep": включён ли режим сна, "deployment": последний деплой или None}."""
+        """{"sleep": whether sleep mode is on, "deployment": the latest deployment or None}."""
         data = self.graphql(
             """query($serviceId: String!, $environmentId: String!) {
                  serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
@@ -208,7 +208,7 @@ class Railway:
         return {"sleep": bool(instance.get("sleepApplication")), "deployment": instance["latestDeployment"]}
 
     def update_instance(self, service_id, environment_id, **settings):
-        """Настройки сервиса в окружении (sleepApplication, startCommand...). Вступают в силу со следующим деплоем."""
+        """Service settings in an environment (sleepApplication, startCommand...). Take effect with the next deploy."""
         self.graphql(
             "mutation($s: String!, $e: String, $input: ServiceInstanceUpdateInput!) "
             "{ serviceInstanceUpdate(serviceId: $s, environmentId: $e, input: $input) }",
@@ -216,12 +216,12 @@ class Railway:
         )
 
     def average_load(self, project_id, start, end, step_seconds=3600, timeout=60):
-        """Средняя нагрузка проекта (все его сервисы, включая базы) за период: {"CPU_USAGE": ядра,
-        "MEMORY_USAGE_GB": ГБ, "DISK_USAGE_GB": ГБ}.
+        """Average project load (all its services, databases included) over a period: {"CPU_USAGE": cores,
+        "MEMORY_USAGE_GB": GB, "DISK_USAGE_GB": GB}.
 
-        Берём metrics, а не usage: у metrics известные единицы (средние ядра и ГБ за интервал), а usage
-        накапливается с задержкой. Для каждого сервиса среднее считается с его первого замера до конца периода,
-        пропуски (сервис спал) — как ноль; затем средние сервисов складываются.
+        We use metrics rather than usage: metrics has known units (average cores and GB per interval), while usage
+        accumulates with a delay. For each service the average runs from its first sample to the end of the period,
+        with gaps (the service was asleep) counted as zero; then the service averages are added up.
         """
         data = self.graphql(
             """query($p: String!, $start: DateTime!, $end: DateTime!, $step: Int!) {
@@ -293,7 +293,7 @@ class Railway:
         return data["deployment"]["status"]
 
     def log_entries(self, deployment_id, build=False, limit=100, start_date=None):
-        """Строки лога: [{"timestamp", "message", "severity"}]. start_date (ISO) — только строки начиная с него."""
+        """Log lines: [{"timestamp", "message", "severity"}]. start_date (ISO): only lines from then on."""
         field = "buildLogs" if build else "deploymentLogs"
         data = self.graphql(
             "query($id: String!, $limit: Int, $startDate: DateTime) "
@@ -306,8 +306,8 @@ class Railway:
         return [entry["message"] for entry in self.log_entries(deployment_id, build=build, limit=limit)]
 
     def service_variables(self, project_id, environment_id, service_id, unrendered=False):
-        """Переменные сервиса. unrendered=True — как записаны, без подстановки ссылок: `${{Postgres.DATABASE_URL}}`,
-        а не готовый адрес с паролем."""
+        """Service variables. unrendered=True: as written, without resolving references: `${{Postgres.DATABASE_URL}}`
+        rather than the final address with the password."""
         ids = {"projectId": project_id, "environmentId": environment_id, "serviceId": service_id}
         if not unrendered:
             data = self.graphql(
@@ -321,7 +321,7 @@ class Railway:
         return data["variables"]
 
     def project_services(self, project_id):
-        """(имя проекта, [{"id", "name"}] его сервисов)."""
+        """(project name, [{"id", "name"}] of its services)."""
         data = self.graphql(
             "query($id: String!) { project(id: $id) { name services { edges { node { id name } } } } }",
             {"id": project_id},
@@ -337,7 +337,7 @@ class Railway:
         )
 
     def redeploy(self, service_id, environment_id):
-        """Перезапустить сервис с текущими переменными (последний образ пересобирать не нужно)."""
+        """Restart the service with the current variables (no need to rebuild the latest image)."""
         self.graphql(
             "mutation($s: String!, $e: String!) { serviceInstanceRedeploy(serviceId: $s, environmentId: $e) }",
             {"s": service_id, "e": environment_id},
@@ -351,7 +351,7 @@ class Railway:
 
 
 def _parse_time(iso):
-    """'2026-10-10T12:00:00Z' -> unix-время."""
+    """'2026-10-10T12:00:00Z' -> Unix time."""
     return datetime.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
 
 

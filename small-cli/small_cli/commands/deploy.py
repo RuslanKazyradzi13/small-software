@@ -1,8 +1,8 @@
-"""small deploy: упаковать код -> найти проект по имени или создать его (projectCreate + serviceCreate)
--> serviceDomainCreate -> записать переменные из small.json (variableCollectionUpsert) -> загрузить архив
-(POST .../up) -> опрашивать deployment(id).status -> напечатать https://<домен>.
+"""small deploy: pack the code -> find the project by name or create it (projectCreate + serviceCreate)
+-> serviceDomainCreate -> write the variables from small.json (variableCollectionUpsert) -> upload the archive
+(POST .../up) -> poll deployment(id).status -> print https://<domain>.
 
-Прогресс пишется в stderr, итоговый URL — в stdout, поэтому `URL=$(small deploy)` работает.
+Progress goes to stderr and the final URL to stdout, so `URL=$(small deploy)` works.
 """
 
 import argparse
@@ -77,8 +77,8 @@ def cmd_deploy(args):
                 % (name, state["name"], name, STATE_FILE))
     else:
         workspace_id = args.workspace or os.environ.get("RAILWAY_WORKSPACE_ID") or pick_workspace(api)
-        # Явно заданное имя (small.json или --name) идентифицирует сервис: если проект уже есть
-        # в Railway (например, деплой с другого компьютера), подключаемся к нему, а не создаём дубликат.
+        # An explicitly set name (small.json or --name) identifies the service: if the project already exists
+        # in Railway (e.g. deployed from another computer), we connect to it instead of creating a duplicate.
         state = bind_existing(api, name, workspace_id) if explicit_name and not args.new else None
         if state:
             say(tr("Found project %s in Railway, linked the folder to it",
@@ -90,24 +90,24 @@ def cmd_deploy(args):
             say(tr("Created service %s", "Создан сервис %s") % name)
             state = {"name": name, "projectId": project_id,
                      "environmentId": environment_id, "serviceId": service_id}
-        # Сохраняем сразу: если сборка упадёт, повторный запуск не наплодит новых проектов.
+        # Save right away: if the build fails, a rerun won't spawn new projects.
         save_state(state_path, state)
 
     if not state.get("domain"):
-        # Домен — до загрузки кода: его адрес нужен уже первой сборке (ссылки в письмах для входа по почте).
+        # Domain before the code upload: the very first build already needs its address (links in sign-in emails).
         state["domain"] = ensure_domain(api, state, args.port)
         save_state(state_path, state)
         say(tr("Public domain: %s", "Публичный домен: %s") % state["domain"])
 
     variables = dict(config["env"])
     if variables.get("ACCESS_EMAILS") and "PUBLIC_URL" not in variables:
-        # После переименования домена Railway оставляет в RAILWAY_PUBLIC_DOMAIN прежний адрес — ссылки для входа
-        # вели бы на 404. Поэтому настоящий адрес передаём сами (только в Railway: домен может смениться).
+        # After a domain rename Railway keeps the old address in RAILWAY_PUBLIC_DOMAIN, so sign-in links
+        # would lead to a 404. That's why we pass the real address ourselves (only to Railway: the domain can change).
         variables["PUBLIC_URL"] = "https://" + state["domain"]
     if variables and "OWNER_LANG" not in variables:
-        variables["OWNER_LANG"] = lang()  # строки лога и уведомления в Telegram — на языке владельца
+        variables["OWNER_LANG"] = lang()  # log lines and Telegram notifications in the owner's language
     if variables:
-        # До загрузки кода, чтобы новая сборка сразу получила переменные. Значения не печатаем.
+        # Before the code upload, so the new build gets the variables right away. Values are not printed.
         api.upsert_variables(state["projectId"], state["environmentId"], state["serviceId"], variables)
         say(tr("Variables from %s: %s%s", "Переменные из %s: %s%s")
             % (CONFIG_FILE, ", ".join(sorted(config["env"])),
@@ -145,7 +145,7 @@ def pick_workspace(api):
     try:
         workspaces = api.workspaces()
     except RailwayError:
-        return None  # токен workspace: `me` ему недоступен, проект создастся в его же workspace
+        return None  # a workspace token: `me` isn't available to it, the project gets created in that same workspace
     if len(workspaces) <= 1:
         return workspaces[0]["id"] if workspaces else None
     listing = "\n".join("  %s  %s" % (w["id"], w["name"]) for w in workspaces)
@@ -154,7 +154,7 @@ def pick_workspace(api):
 
 
 def bind_existing(api, name, workspace_id):
-    """Ищет в Railway проект с именем name и возвращает state для привязки к нему, либо None."""
+    """Looks up a Railway project named name and returns the state to link to it, or None."""
     try:
         projects = api.find_projects(name, workspace_id)
     except RailwayError as e:
@@ -190,7 +190,7 @@ def bind_existing(api, name, workspace_id):
 
 
 def ensure_domain(api, state, port):
-    """Создаёт домен *.up.railway.app и пытается переименовать его в <name>.up.railway.app."""
+    """Creates a *.up.railway.app domain and tries to rename it to <name>.up.railway.app."""
     sid, eid = state["serviceId"], state["environmentId"]
     domain_id, domain = api.create_domain(sid, eid, port)
     wanted = state["name"] + ".up.railway.app"

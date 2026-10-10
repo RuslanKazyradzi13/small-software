@@ -1,6 +1,6 @@
-"""Кнопка «Поделиться» в small dashboard: /api/access на настоящем сервере дашборда против мока Railway.
+"""The "Share" button in small dashboard: /api/access on the real dashboard server against a Railway mock.
 
-Запуск: cd small-cli && python -m unittest discover -s tests
+Run: cd small-cli && python -m unittest discover -s tests
 """
 
 import http.client
@@ -21,7 +21,7 @@ from test_small import TOKEN, MockRailway, write
 CYRILLIC = re.compile("[Ѐ-ӿ]")
 STATE = {"name": "shop", "projectId": "proj-1", "environmentId": "env-1", "serviceId": "svc-1",
          "domain": "shop.up.railway.app"}
-OWNER, ALICE = "tok-owner-secret", "tok-alice-secret"  # общая ссылка владельца и личная ссылка alice
+OWNER, ALICE = "tok-owner-secret", "tok-alice-secret"  # the owner's shared link and alice's personal link
 MUTATIONS = ("variableCollectionUpsert", "variableDelete", "serviceInstanceRedeploy")
 
 
@@ -36,14 +36,14 @@ class ShareTestCase(unittest.TestCase):
         tokens = "%s,alice:%s" % (OWNER, ALICE)
         write(self.root, "shop/small.json", json.dumps({"name": "shop", "env": {"ACCESS_TOKEN": tokens}}))
         write(self.root, "shop/.small.json", json.dumps(STATE))
-        write(self.root, "shop/magic_link.py", "# supports ACCESS_EMAILS\n")  # шаблон умеет вход по почте
-        write(self.root, "draft/small.json", '{"name": "draft"}')            # не задеплоено
+        write(self.root, "shop/magic_link.py", "# supports ACCESS_EMAILS\n")  # the template supports email sign-in
+        write(self.root, "draft/small.json", '{"name": "draft"}')            # not deployed
         self.railway = MockRailway(service_vars={"ACCESS_TOKEN": tokens, "RAILWAY_PUBLIC_DOMAIN": "x"})
         self.addCleanup(self.railway.close)
         patcher = mock.patch.dict(os.environ, {"SMALL_API_URL": self.railway.url, "RAILWAY_API_TOKEN": TOKEN})
         patcher.start()
         self.addCleanup(patcher.stop)
-        os.environ.pop("RAILWAY_TOKEN", None)  # patch.dict вернёт его на место
+        os.environ.pop("RAILWAY_TOKEN", None)  # patch.dict will put it back
         self.server = self.serve()
 
     def serve(self, token=TOKEN):
@@ -54,7 +54,8 @@ class ShareTestCase(unittest.TestCase):
         return server
 
     def request(self, method, path, payload=None, raw=None, server=None, secret=True, headers=None):
-        """Запрос как со страницы дашборда: наш Host и ключ сервера. headers дополняют и заменяют их (None — убрать)."""
+        """A request as if from the dashboard page: our Host and the server key. headers add to and override
+        them (None removes one)."""
         server = server or self.server
         port = server.server_address[1]
         sent = {"Host": "127.0.0.1:%d" % port, SECRET_HEADER: server.secret if secret else None}
@@ -91,15 +92,15 @@ class ShareApiTest(ShareTestCase):
         data = json.loads(res.text)
         self.assertEqual((data["kind"], data["who"], data["url"]),
                          ("email", "ivan@company.com", "https://shop.up.railway.app/"))
-        self.assertFalse(data["mailConfigured"])  # почта не настроена: страница предупредит, что письма не уходят
-        self.assertNotIn("link", data)            # никаких ссылок-паролей: человек входит своей почтой
+        self.assertFalse(data["mailConfigured"])  # mail isn't set up: the page will warn that emails don't go out
+        self.assertNotIn("link", data)            # no password-like links: people sign in with their own email
         env = self.config()
         self.assertEqual(env["ACCESS_EMAILS"], "ivan@company.com")
         self.assertRegex(env["SESSION_SECRET"], r"^[A-Za-z0-9_-]{40,}$")
         self.assertEqual(self.railway.variables["variableCollectionUpsert"]["input"]["variables"],
                          {"ACCESS_EMAILS": "ivan@company.com", "SESSION_SECRET": env["SESSION_SECRET"],
                           "PUBLIC_URL": "https://shop.up.railway.app"})
-        self.assertNotIn("PUBLIC_URL", env)  # его small ведёт сам, как в small access add
+        self.assertNotIn("PUBLIC_URL", env)  # small manages it itself, as in small access add
         self.assertEqual(self.railway.calls[-1], "serviceInstanceRedeploy")
         self.assertNotIn(env["SESSION_SECRET"], res.text)
 
@@ -107,7 +108,7 @@ class ShareApiTest(ShareTestCase):
         self.assertEqual(res.status, 200, res.text)
         self.assertEqual(json.loads(res.text)["kind"], "domain")
         self.assertEqual(self.config()["ACCESS_EMAILS"], "ivan@company.com, @team.com")
-        self.assertEqual(self.config()["SESSION_SECRET"], env["SESSION_SECRET"])  # ключ прежний — входы живы
+        self.assertEqual(self.config()["SESSION_SECRET"], env["SESSION_SECRET"])  # same key: sign-ins stay valid
 
         res = self.post("add", "IVAN@company.com")
         self.assertEqual(res.status, 400)
@@ -156,12 +157,12 @@ class ShareApiTest(ShareTestCase):
         self.assertEqual(data["links"], [{"who": "", "shared": True}, {"who": "alice", "shared": False},
                                          {"who": "bob", "shared": False}])
         self.assertEqual(data["emails"], [])
-        # Ни список доступа, ни страница, ни список приложений токенов не отдают.
+        # Neither the access list, nor the page, nor the app list returns tokens.
         seen = listed.text + "".join(self.request("GET", path).text for path in ("/", "/api/apps"))
         for secret in (OWNER, ALICE, token):
             self.assertNotIn(secret, seen)
 
-        res = self.post("add", "bob")  # у bob ссылка уже есть: вторую не выдаём и первую не показываем
+        res = self.post("add", "bob")  # bob already has a link: we don't issue a second one and don't show the first
         self.assertEqual(res.status, 400)
         self.assertIn("already has a link", json.loads(res.text)["error"])
         self.assertNotIn(token, res.text)
@@ -181,7 +182,7 @@ class ShareApiTest(ShareTestCase):
         self.assertNotIn("ACCESS_EMAILS", self.config())
         self.assertNotIn("ACCESS_EMAILS", self.railway.service_vars)
 
-        res = self.post("revoke", "")  # общая ссылка без имени — и последняя
+        res = self.post("revoke", "")  # the shared link without a name, which is also the last one
         self.assertEqual(res.status, 200, res.text)
         data = json.loads(res.text)
         self.assertEqual((data["kind"], data["who"]), ("link", ""))
@@ -192,7 +193,7 @@ class ShareApiTest(ShareTestCase):
         listed = self.list()
         self.assertEqual((listed["emails"], listed["links"]), ([], []))
 
-        for who in ("alice", "nobody@company.com", ""):  # отзывать уже нечего
+        for who in ("alice", "nobody@company.com", ""):  # nothing left to revoke
             res = self.post("revoke", who)
             self.assertEqual(res.status, 400, who)
             self.assertIn("error", json.loads(res.text))
@@ -234,7 +235,7 @@ class ShareApiTest(ShareTestCase):
             res = self.post("add", "bob")
         self.assertEqual(res.status, 502)
         self.assertIn("Railway: Not Authorized", json.loads(res.text)["error"])
-        self.assertEqual(self.config(), before)  # Railway отказал — small.json не тронут
+        self.assertEqual(self.config(), before)  # Railway refused: small.json is untouched
         self.assertEqual(self.mutations(), [])
 
 
@@ -245,7 +246,7 @@ class ShareSecurityTest(ShareTestCase):
 
     def test_missing_or_wrong_secret_is_forbidden(self):
         before = self.config()
-        other = self.serve()  # ключ — свой у каждого запуска сервера
+        other = self.serve()  # every server run has its own key
         self.assertNotEqual(other.secret, self.server.secret)
         for value in (None, "", "wrong", self.server.secret + "x", self.server.secret[:-1], "é", other.secret):
             headers = {SECRET_HEADER: value}
@@ -254,7 +255,7 @@ class ShareSecurityTest(ShareTestCase):
             self.assertIn("reload the page", json.loads(res.text)["error"])
             self.assertEqual(self.request("GET", "/api/access?app=shop", headers=headers).status, 403, value)
         self.assertNothingChanged(before)
-        self.assertEqual(self.railway.calls, [])  # до Railway дело не дошло
+        self.assertEqual(self.railway.calls, [])  # it never got as far as Railway
 
     def test_foreign_host_is_forbidden(self):
         before = self.config()
@@ -274,7 +275,7 @@ class ShareSecurityTest(ShareTestCase):
             self.assertEqual(self.post("add", "bob", headers=headers).status, 403, headers)
             self.assertEqual(self.request("GET", "/api/access?app=shop", headers=headers).status, 403, headers)
         self.assertNothingChanged(before)
-        same = {"Origin": "http://localhost:%d" % port, "Sec-Fetch-Site": "same-origin"}  # как шлёт сам браузер
+        same = {"Origin": "http://localhost:%d" % port, "Sec-Fetch-Site": "same-origin"}  # as the browser itself sends
         self.assertEqual(self.post("add", "bob", headers=same).status, 200)
 
     def test_cors_preflight_is_never_approved(self):
@@ -299,14 +300,14 @@ class ShareSecurityTest(ShareTestCase):
                                 ({"Content-Length": "10" * 20}, 413),
                                 ({}, 411), ({"Content-Length": "-1"}, 411), ({"Content-Length": "abc"}, 411),
                                 ({"Transfer-Encoding": "chunked"}, 411)):
-            self.assertEqual(self.headers_only(headers), status, headers)  # тело сервер даже не ждёт
+            self.assertEqual(self.headers_only(headers), status, headers)  # the server doesn't even wait for the body
         self.assertNothingChanged(before)
         res = self.request("POST", "/api/access", raw=body, headers={"Content-Type": "application/json; charset=utf-8"})
         self.assertEqual(res.status, 200, res.text)
-        self.assertEqual(self.request("POST", "/api/apps", raw=body).status, 404)  # других POST-адресов нет
+        self.assertEqual(self.request("POST", "/api/apps", raw=body).status, 404)  # there are no other POST endpoints
 
     def headers_only(self, headers):
-        """POST без тела с заданными заголовками (Content-Length может врать): код ответа."""
+        """POST without a body with the given headers (Content-Length may lie): the response code."""
         port = self.server.server_address[1]
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
         conn.putrequest("POST", "/api/access", skip_host=True, skip_accept_encoding=True)
@@ -329,15 +330,15 @@ class SharePageTest(ShareTestCase):
             self.assertEqual(res.status, 200)
             page = res.text
             self.assertIn('<html lang="%s">' % language, page)
-            self.assertIn('"share": "%s"' % share, page)  # подпись кнопки на карточке — в T
+            self.assertIn('"share": "%s"' % share, page)  # the button label on the card comes from T
             self.assertIn("openShare(app, share)", page)
             self.assertIn(">%s</button>" % add, page)
             self.assertIn('id="share-close" type="button" aria-label="%s"' % close, page)
             self.assertIn('const SECRET = "%s";' % self.server.secret, page)
-            # Tailwind-класс display перебил бы атрибут hidden — окно было бы открыто сразу.
+            # A Tailwind display class would override the hidden attribute: the dialog would be open right away.
             classes = re.search(r'<div id="share" hidden class="([^"]*)"', page).group(1).split()
             self.assertFalse({"flex", "grid", "block", "inline-flex"} & set(classes), classes)
-            self.assertEqual(res.getheader("X-Frame-Options"), "DENY")  # страницу с ключом не встроить в чужой сайт
+            self.assertEqual(res.getheader("X-Frame-Options"), "DENY")  # other sites can't frame the page with the key
             self.assertIn("frame-ancestors 'none'", res.getheader("Content-Security-Policy"))
             if language == "en":
                 self.assertIsNone(CYRILLIC.search(page))

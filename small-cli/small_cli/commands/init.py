@@ -1,5 +1,5 @@
-"""small init: заготовка приложения из шаблона — сервер с защитой по ссылке-приглашению,
-small.json с уникальным именем и ACCESS_TOKEN, .gitignore и .railwayignore."""
+"""small init: an app scaffold from a template — a server protected by an invite link,
+small.json with a unique name and ACCESS_TOKEN, .gitignore and .railwayignore."""
 
 import argparse
 import json
@@ -43,7 +43,7 @@ def cmd_init(args):
     files = scaffold.template_files(args.template)
     files[CONFIG_FILE] = (json.dumps(config, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
-    # Ignore-файлы не перезаписываются, а дополняются, поэтому конфликтом не считаются.
+    # Ignore files are appended to rather than overwritten, so they don't count as conflicts.
     conflicts = [rel for rel in files if (root / rel).exists()]
     if conflicts and not args.force:
         listing = ", ".join(conflicts)
@@ -81,6 +81,6 @@ def cmd_init(args):
 
 
 def unique_name(folder_name):
-    """Имя папки + случайный суффикс: явное имя из small.json привязывает деплой к одноимённому проекту,
-    поэтому оно не должно совпасть с чужим проектом, а поддомен <name>.up.railway.app — с занятым."""
+    """Folder name + a random suffix: an explicit name in small.json links the deploy to the project with that name,
+    so it must not collide with someone else's project, nor the <name>.up.railway.app subdomain with a taken one."""
     return "%s-%s" % (slugify(folder_name)[:35].strip("-") or "app", secrets.token_hex(2))

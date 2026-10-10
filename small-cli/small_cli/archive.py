@@ -1,19 +1,19 @@
-"""Сбор файлов проекта с учётом .gitignore/.railwayignore и упаковка в .tar.gz для Railway."""
+"""Collecting project files with .gitignore/.railwayignore applied, and packing them into a .tar.gz for Railway."""
 
 import io
 import os
 import re
 import tarfile
 
-# Никогда не загружаются, даже без .gitignore.
+# Never uploaded, even without a .gitignore.
 ALWAYS_IGNORED = {".git", "node_modules", "__pycache__", ".venv", "venv"}
 IGNORE_FILES = (".gitignore", ".railwayignore")
 
 
 class IgnoreRules:
-    """Подмножество синтаксиса .gitignore: *, **, ?, [...], !отрицание, /якорь, хвостовой / для папок.
+    """A subset of .gitignore syntax: *, **, ?, [...], !negation, /anchor, trailing / for folders.
 
-    Читаются только файлы в корне проекта; вложенные .gitignore не учитываются.
+    Only the files in the project root are read; nested .gitignore files are not taken into account.
     """
 
     def __init__(self, lines):
@@ -90,9 +90,9 @@ def _translate(pattern):
 
 
 def collect_files(root, skip_root_files=()):
-    """Относительные пути (через /) всех файлов, которые уйдут в Railway.
+    """Relative paths (with /) of all files that will go to Railway.
 
-    skip_root_files — имена файлов, которые не загружаются, только если лежат в корне (служебные файлы CLI).
+    skip_root_files: names of files that are not uploaded, but only when they are in the root (the CLI's own files).
     """
     rules = IgnoreRules.load(root)
     files = []

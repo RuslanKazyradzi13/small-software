@@ -1,4 +1,4 @@
-"""Общее для всех команд: ошибки, вывод, вопросы пользователю, папка приложения и токен Railway."""
+"""Shared by all commands: errors, output, questions to the user, the app folder and the Railway token."""
 
 import re
 import sys
@@ -15,12 +15,12 @@ class CliError(Exception):
 
 
 def say(message):
-    """Прогресс и пояснения — в stderr; в stdout только результат (URL, ссылка, таблица)."""
+    """Progress and explanations go to stderr; stdout gets only the result (URL, link, table)."""
     print(message, file=sys.stderr, flush=True)
 
 
 def ask(prompt):
-    """Ответ пользователя или None, если терминала нет (скрипт, CI) или ввод закрыт."""
+    """The user's answer, or None if there is no terminal (script, CI) or input is closed."""
     if not sys.stdin or not sys.stdin.isatty():
         return None
     sys.stderr.write(prompt)
@@ -84,7 +84,7 @@ def format_elapsed(seconds):
 
 
 def log_time(timestamp):
-    """ISO-время Railway (UTC, с наносекундами) -> локальное ЧЧ:ММ:СС."""
+    """Railway ISO time (UTC, with nanoseconds) -> local HH:MM:SS."""
     try:
         moment = datetime.strptime(timestamp[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
         return moment.astimezone().strftime("%H:%M:%S")

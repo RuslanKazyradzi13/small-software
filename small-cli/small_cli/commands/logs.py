@@ -1,4 +1,4 @@
-"""small logs: лог последнего деплоя — приложения или сборки, с режимом слежения -f."""
+"""small logs: the log of the latest deploy (app or build), with a -f follow mode."""
 
 import argparse
 import time

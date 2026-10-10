@@ -1,5 +1,5 @@
 'use strict';
-// Тесты magic-link.js. Запуск: node --test
+// Tests for magic-link.js. Run: node --test
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const http = require('node:http');
@@ -7,7 +7,7 @@ const { test, before, after, mock } = require('node:test');
 
 const magicLink = require('./magic-link');
 
-// Проверки читают русские строки лога; английские — в тесте про OWNER_LANG.
+// The checks read Russian log lines; the English ones are in the OWNER_LANG test.
 process.env.OWNER_LANG = 'ru';
 
 const TOKEN = 's3cret-token';
@@ -29,7 +29,7 @@ after(() => server.close());
 
 const get = (path, headers = {}) => fetch(base + path, { headers, redirect: 'manual' });
 
-test('без токена — 403 с кнопкой «Запросить доступ»', async () => {
+test('no token: 403 with a "Request access" button', async () => {
   const res = await get('/');
   const body = await res.text();
   assert.equal(res.status, 403);
@@ -40,7 +40,7 @@ test('без токена — 403 с кнопкой «Запросить дос�
   assert.doesNotMatch(body, /secret page/);
 });
 
-test('верный токен ставит куку и убирает токен из адреса', async () => {
+test('a valid token sets the cookie and strips the token from the URL', async () => {
   const res = await get(`/reports?token=${TOKEN}&page=2`);
   assert.equal(res.status, 302);
   assert.equal(res.headers.get('location'), '/reports?page=2');
@@ -51,18 +51,18 @@ test('верный токен ставит куку и убирает токен
   assert.ok(!cookie.includes('Secure'));
 });
 
-test('за https-прокси кука получает Secure', async () => {
+test('behind an https proxy the cookie gets Secure', async () => {
   const res = await get(`/?token=${TOKEN}`, { 'x-forwarded-proto': 'https' });
   assert.ok(res.headers.get('set-cookie').includes('; Secure'));
 });
 
-test('с верной кукой пропускает в приложение', async () => {
+test('a valid cookie lets the request through to the app', async () => {
   const res = await get('/', { cookie: 'other=1; ' + COOKIE });
   assert.equal(res.status, 200);
   assert.equal(await res.text(), 'secret page');
 });
 
-test('неверный токен и поддельная кука — 403', async () => {
+test('a wrong token and a forged cookie get 403', async () => {
   const res = await get('/?token=wrong');
   assert.equal(res.status, 403);
   assert.match(await res.text(), /Ссылка недействительна/);
@@ -71,7 +71,7 @@ test('неверный токен и поддельная кука — 403', asy
   }
 });
 
-test('нет открытого редиректа', async () => {
+test('no open redirect', async () => {
   const res = await new Promise((resolve) => {
     http.get({ host: '127.0.0.1', port: server.address().port, path: `//evil.example/x?token=${TOKEN}` }, resolve);
   });
@@ -80,7 +80,7 @@ test('нет открытого редиректа', async () => {
   assert.ok(!res.headers.location.startsWith('//'), res.headers.location);
 });
 
-test('несколько токенов через запятую в ACCESS_TOKEN', async (t) => {
+test('several comma-separated tokens in ACCESS_TOKEN', async (t) => {
   t.after(() => { delete process.env.ACCESS_TOKEN; });
   process.env.ACCESS_TOKEN = 'alice-token, bob-token';
   const s = await serve();
@@ -91,7 +91,7 @@ test('несколько токенов через запятую в ACCESS_TOKE
   assert.equal((await url('carol')).status, 403);
 });
 
-test('без ACCESS_TOKEN доступ закрыт для всех', async (t) => {
+test('without ACCESS_TOKEN nobody gets in', async (t) => {
   const log = mock.method(console, 'log', () => {});
   t.after(() => log.mock.restore());
   const s = await serve({ tokens: '', emails: '' });
@@ -102,7 +102,7 @@ test('без ACCESS_TOKEN доступ закрыт для всех', async (t) 
   assert.equal((await fetch(`http://127.0.0.1:${port}/?token=`)).status, 403);
 });
 
-test('запрос доступа пишется в лог одной строкой', async (t) => {
+test('an access request is logged as a single line', async (t) => {
   const log = mock.method(console, 'log', () => {});
   t.after(() => log.mock.restore());
   const res = await fetch(base + '/_access/request', {
@@ -115,19 +115,19 @@ test('запрос доступа пишется в лог одной строк
   assert.match(body, /Запрос отправлен/);
   assert.doesNotMatch(body, /<form/);
   const line = log.mock.calls[0].arguments[0];
-  assert.ok(!line.includes('\n'), 'перевод строки из формы не должен порождать поддельную строку лога');
+  assert.ok(!line.includes('\n'), 'a line break from the form must not create a forged log line');
   const entry = JSON.parse(line.replace('[access-request] ', ''));
   assert.equal(entry.contact, '@ivan\n[access-request] fake');
   assert.equal(entry.ip, '203.0.113.7');
 });
 
-test('разбор токенов с именами', () => {
+test('parsing named tokens', () => {
   assert.deepEqual(magicLink.parseTokens(' alice:tok-a, tok-b ,, bob : tok-c '),
     [{ name: 'alice', token: 'tok-a' }, { name: '', token: 'tok-b' }, { name: 'bob', token: 'tok-c' }]);
   assert.deepEqual(magicLink.parseTokens(''), []);
 });
 
-test('токен на каждого: отзыв одного не задевает остальных', async (t) => {
+test('one token per person: revoking one does not affect the others', async (t) => {
   const log = mock.method(console, 'log', () => {});
   t.after(() => log.mock.restore());
   const full = await serve({ tokens: 'alice:tok-a,bob:tok-b' });
@@ -139,7 +139,7 @@ test('токен на каждого: отзыв одного не задева�
   const bobCookie = res.headers.get('set-cookie').split(';')[0];
   const aliceCookie = 'small_access=' + crypto.createHmac('sha256', 'tok-a').update('magic-link-cookie').digest('hex');
 
-  const revoked = await serve({ tokens: 'alice:tok-a' }); // bob убран из ACCESS_TOKEN
+  const revoked = await serve({ tokens: 'alice:tok-a' }); // bob removed from ACCESS_TOKEN
   t.after(() => revoked.close());
   const url = `http://127.0.0.1:${revoked.address().port}/`;
   assert.equal((await fetch(url, { headers: { cookie: bobCookie } })).status, 403);
@@ -147,7 +147,7 @@ test('токен на каждого: отзыв одного не задева�
   assert.equal((await fetch(url, { headers: { cookie: aliceCookie } })).status, 200);
 });
 
-test('запрос доступа приходит владельцу в Telegram', async (t) => {
+test('an access request reaches the owner in Telegram', async (t) => {
   const messages = [];
   const inbox = http.createServer((req, res) => {
     let body = '';
@@ -180,7 +180,7 @@ test('запрос доступа приходит владельцу в Telegra
   }
 });
 
-test('владелец читает лог и Telegram на своём языке (OWNER_LANG)', async (t) => {
+test('the owner reads the log and Telegram in their language (OWNER_LANG)', async (t) => {
   const messages = [];
   const inbox = http.createServer((req, res) => {
     let body = '';
@@ -210,7 +210,7 @@ test('владелец читает лог и Telegram на своём язык�
   }
 });
 
-test('ACCESS_REQUEST_URL заменяет форму ссылкой', async (t) => {
+test('ACCESS_REQUEST_URL replaces the form with a link', async (t) => {
   const s = await serve({ tokens: TOKEN, requestUrl: 'mailto:owner@example.com?subject=Доступ"' });
   t.after(() => s.close());
   const port = s.address().port;
@@ -221,7 +221,7 @@ test('ACCESS_REQUEST_URL заменяет форму ссылкой', async (t) 
   assert.equal(post.status, 403);
 });
 
-// --- Вход по почте ---
+// --- Email sign-in ---
 
 function setEnv(t, vars) {
   const saved = {};
@@ -232,7 +232,7 @@ function setEnv(t, vars) {
   t.after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
 }
 
-// http.request, а не fetch: так можно подставить свой заголовок Host.
+// http.request rather than fetch, so we can set our own Host header.
 function request(port, { method = 'GET', path = '/', headers = {}, body = '' } = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, method, path,
@@ -267,7 +267,7 @@ async function emailServer(t, options = {}) {
   return { port, log, sent, ask, tokenOf, confirm };
 }
 
-test('вход по почте: письмо, кнопка «Войти», кука, одноразовая ссылка', async (t) => {
+test('email sign-in: email, "Sign in" button, cookie, one-time link', async (t) => {
   const { port, log, sent, ask, tokenOf, confirm } = await emailServer(t);
   const start = await request(port);
   assert.equal(start.status, 403);
@@ -285,7 +285,7 @@ test('вход по почте: письмо, кнопка «Войти», ку�
   assert.ok(link.startsWith('https://reports.up.railway.app/_access/verify?t='), link);
 
   const token = tokenOf(link);
-  for (let i = 0; i < 2; i++) { // почтовый сканер открывает ссылку — вход ещё не происходит
+  for (let i = 0; i < 2; i++) { // a mail scanner opens the link: no sign-in happens yet
     const opened = await request(port, { path: '/_access/verify?t=' + encodeURIComponent(token) });
     assert.equal(opened.status, 200);
     assert.match(opened.body, /войти как ivan@company\.com/);
@@ -307,7 +307,7 @@ test('вход по почте: письмо, кнопка «Войти», ку�
   assert.match(again.body, /Ссылка для входа устарела/);
 });
 
-test('вход по почте: незнакомый адрес — тот же ответ и запрос доступа, домен целиком', async (t) => {
+test('email sign-in: an unknown address gets the same response and an access request; whole domain', async (t) => {
   const { log, sent, ask } = await emailServer(t);
   const known = await ask('ivan@company.com');
   const unknown = await ask('stranger@evil.example', '198.51.100.1');
@@ -319,7 +319,7 @@ test('вход по почте: незнакомый адрес — тот же 
   assert.deepEqual(sent.map((m) => m[0]), ['ivan@company.com', 'petr@team.com']);
 });
 
-test('вход по почте: отзыв адреса, подделка куки, другой секрет', async (t) => {
+test('email sign-in: revoked address, forged cookie, different secret', async (t) => {
   const { sent, ask, tokenOf, confirm } = await emailServer(t);
   await ask('ivan@company.com');
   const cookie = (await confirm(tokenOf(sent[0][1]))).headers['set-cookie'][0].split(';')[0];
@@ -336,12 +336,12 @@ test('вход по почте: отзыв адреса, подделка кук
   const s = await serve({ tokens: '', emails: 'ivan@company.com, boss@company.com', secret: 'test-secret' });
   t.after(() => s.close());
   assert.equal((await request(s.address().port, { headers: { cookie: `small_access=e.${forged}.${mac}` } })).status, 403);
-  // Ссылку для входа нельзя выдать за сессию.
+  // A sign-in link can't be passed off as a session.
   await ask('ivan@company.com', '198.51.100.9');
   assert.equal((await request(s.address().port, { headers: { cookie: 'small_access=e.' + tokenOf(sent[1][1]) } })).status, 403);
 });
 
-test('вход по почте: лимит писем, неверный адрес, Host не подменяет ссылку, выход', async (t) => {
+test('email sign-in: email limit, invalid address, Host does not change the link, sign-out', async (t) => {
   const { port, sent, ask } = await emailServer(t);
   for (let i = 0; i < 3; i++) assert.equal((await ask('ivan@company.com', `198.51.100.${i}`)).status, 200);
   const slow = await ask('ivan@company.com', '198.51.100.99');
@@ -364,7 +364,7 @@ test('вход по почте: лимит писем, неверный адре
   assert.ok(out.headers['set-cookie'][0].includes('Max-Age=0'));
 });
 
-test('письмо уходит через Resend; ошибка пишется в лог без ключа; режим лога', async (t) => {
+test('email goes through Resend; errors are logged without the key; log mode', async (t) => {
   const requests = [];
   let status = 200;
   const api = http.createServer((req, res) => {
@@ -404,13 +404,13 @@ test('письмо уходит через Resend; ошибка пишется �
   assert.ok(log.mock.calls.some((c) => String(c.arguments[0]) === `[magic-link] ссылка для входа (ivan@company.com): ${link}`));
 });
 
-test('язык: русским по-русски, остальным по-английски, ACCESS_LANG сильнее браузера', async (t) => {
+test('language: Russian for Russian speakers, English for others, ACCESS_LANG beats the browser', async (t) => {
   const pick = magicLink.pickLang;
   assert.equal(pick(''), 'ru');
   assert.equal(pick('en-US,en;q=0.9,ru;q=0.8'), 'en');
   assert.equal(pick('ru-RU,ru;q=0.9,en-US;q=0.8'), 'ru');
   assert.equal(pick('fr-FR'), 'en');
-  assert.equal(pick('*'), 'ru'); // так fetch в Node пишет по умолчанию: «любой язык»
+  assert.equal(pick('*'), 'ru'); // what Node's fetch sends by default: "any language"
   assert.equal(pick('en;q=0.3, ru;q=0.6'), 'ru');
   assert.equal(pick('ru', 'en'), 'en');
 
@@ -423,7 +423,7 @@ test('язык: русским по-русски, остальным по-анг
   assert.match(page.body, /Email me a sign-in link/);
   await request(port, { method: 'POST', path: '/_access/login', body: 'email=ivan%40company.com',
     headers: { ...english, 'x-forwarded-for': '198.51.100.70', host: 'reports.up.railway.app' } });
-  assert.equal(sent[0][3], 'en'); // письмо — на языке того, кто просил вход
+  assert.equal(sent[0][3], 'en'); // the email is in the language of whoever asked to sign in
   const forced = await serve({ tokens: TOKEN, requestUrl: '', emails: '', lang: 'en' });
   t.after(() => forced.close());
   const body = (await request(forced.address().port)).body;

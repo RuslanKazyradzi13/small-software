@@ -155,8 +155,8 @@ Starlette) и Node.js (Express, чистый `http`). `small init` кладёт 
 ## Разработка
 
 ```bash
-cd small-cli   && python -m unittest discover -s tests     # 120 тестов (+ настоящие FastAPI/Streamlit, если установлены)
-cd magic-link  && python -m unittest test_magic_link       # 51 тест
+cd small-cli   && python -m unittest discover -s tests     # 160 тестов (+ настоящие FastAPI/Streamlit, если установлены)
+cd magic-link  && python -m unittest test_magic_link       # 65 тестов
 cd magic-link  && node --test                              # 20 тестов
 ```
 

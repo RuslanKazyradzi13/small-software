@@ -1,32 +1,34 @@
 'use strict';
 /**
- * Защита Node.js-приложения: вход по рабочей почте или по ссылке-приглашению. Один файл, без зависимостей, Node 18+.
+ * Protect a Node.js app: sign in with a work email or an invitation link. One file, no dependencies, Node 18+.
  *
  *   const magicLink = require('./magic-link');
  *   app.use(magicLink());                                               // Express / Connect
  *
- *   const guard = magicLink();                                          // чистый http
+ *   const guard = magicLink();                                          // plain http
  *   http.createServer((req, res) => guard(req, res, () => handler(req, res)));
  *
- * Два способа пустить человека:
- *   - Вход по почте — как доступ к Google Doc. Владелец перечисляет адреса в ACCESS_EMAILS. Человек вводит свою
- *     почту и получает письмо со ссылкой для входа (15 минут, один раз); браузер помнит вход 30 дней.
- *     Незнакомый адрес — это запрос доступа.
- *   - Ссылка-приглашение https://<app>/?token=<токен> (ACCESS_TOKEN): ставит куку и перенаправляет без токена.
- * Без доступа — страница 403: форма входа по почте (если задан ACCESS_EMAILS) или кнопка «Запросить доступ».
+ * Two ways to let someone in:
+ *   - Email sign-in, like sharing a Google Doc. The owner lists addresses in ACCESS_EMAILS. A person enters their
+ *     email and gets a message with a sign-in link (valid for 15 minutes, once); the browser remembers the sign-in
+ *     for 30 days. An unknown address is an access request.
+ *   - Invitation link https://<app>/?token=<token> (ACCESS_TOKEN): sets a cookie and redirects without the token.
+ * Without access: a 403 page with an email sign-in form (if ACCESS_EMAILS is set) or a "Request access" button.
  *
- * Переменные окружения:
- *   ACCESS_EMAILS       адреса через запятую; "@company.com" — весь домен. Убрали адрес — вход перестаёт работать сразу.
- *   SESSION_SECRET      ключ подписи ссылок и сессий (small создаёт сам). Не задан — случайный на каждый запуск.
- *   RESEND_API_KEY, MAIL_FROM   письма через Resend (HTTPS). SMTP в Node-версии нет: используйте Resend.
- *   LOGIN_LINKS_TO_LOG  1 — не слать письма, а писать ссылку для входа в лог. Только для проверки.
- *   PUBLIC_URL          адрес приложения для ссылок в письмах; иначе RAILWAY_PUBLIC_DOMAIN; локально — localhost.
- *   ACCESS_TOKEN        токены ссылок-приглашений через запятую, можно с именами: "alice:токен1,bob:токен2".
- *   ACCESS_REQUEST_URL  куда ведёт кнопка «Запросить доступ», если нет входа по почте (mailto:..., https://t.me/...).
- *   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  запросы доступа приходят владельцу в Telegram (small notify telegram).
- *   ACCESS_LANG         язык страниц и писем: ru, en или auto (по умолчанию — по заголовку Accept-Language).
- *   OWNER_LANG          язык сообщений для владельца — строк лога и уведомлений в Telegram: en (по умолчанию) или ru.
- *                       small deploy задаёт его по языку small.
+ * Environment variables:
+ *   ACCESS_EMAILS       comma-separated addresses; "@company.com" means the whole domain. Remove an address and
+ *                       sign-in stops working immediately.
+ *   SESSION_SECRET      key that signs links and sessions (small generates it). If unset, a random one per start.
+ *   RESEND_API_KEY, MAIL_FROM   email through Resend (HTTPS). The Node version has no SMTP: use Resend.
+ *   LOGIN_LINKS_TO_LOG  1: don't send email, write the sign-in link to the log instead. For testing only.
+ *   PUBLIC_URL          app address used in email links; otherwise RAILWAY_PUBLIC_DOMAIN; locally, localhost.
+ *   ACCESS_TOKEN        comma-separated invitation-link tokens, optionally named: "alice:token1,bob:token2".
+ *   ACCESS_REQUEST_URL  where the "Request access" button leads when there is no email sign-in
+ *                       (mailto:..., https://t.me/...).
+ *   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID  access requests reach the owner in Telegram (small notify telegram).
+ *   ACCESS_LANG         language of pages and emails: ru, en or auto (default: from the Accept-Language header).
+ *   OWNER_LANG          language of messages for the owner (log lines and Telegram notifications): en (default)
+ *                       or ru. small deploy sets it to match small's language.
  */
 
 const crypto = require('node:crypto');
@@ -38,7 +40,7 @@ const REQUEST_PATH = '/_access/request';
 const LOGIN_PATH = '/_access/login';
 const VERIFY_PATH = '/_access/verify';
 const LOGOUT_PATH = '/_access/logout';
-// Сколько писем для входа можно запросить за 15 минут: на один адрес и с одного IP.
+// How many sign-in emails can be requested within 15 minutes: per address and per IP.
 const LIMIT_PER_EMAIL = 3;
 const LIMIT_PER_IP = 10;
 const LIMIT_WINDOW = 15 * 60 * 1000;
@@ -47,7 +49,7 @@ const EMAIL_RE = /^[^@\s,;<>"']+@[^@\s,;<>"']+\.[^@\s,;<>"']+$/;
 const DOMAIN_RE = /^@[^@\s,;<>"']+\.[^@\s,;<>"']+$/;
 
 const LANGS = ['ru', 'en'];
-const DEFAULT_LANG = 'ru'; // если браузер не сказал, какой язык предпочитает
+const DEFAULT_LANG = 'ru'; // when the browser doesn't say which language it prefers
 
 const MESSAGES = {
   ru: {
@@ -101,16 +103,16 @@ const UI = {
   },
 };
 
-// Язык страницы: ACCESS_LANG (ru/en), иначе самый предпочтительный из ru/en в Accept-Language.
+// Page language: ACCESS_LANG (ru/en), otherwise whichever of ru/en Accept-Language prefers most.
 function pickLang(acceptLanguage, setting = 'auto') {
   if (LANGS.includes(setting)) return setting;
   if (!String(acceptLanguage || '').trim()) return DEFAULT_LANG;
-  let best = 'en'; // браузер просит другой язык (de, fr…) — английский понятнее, чем русский
+  let best = 'en'; // browser wants some other language (de, fr...): English is a safer bet than Russian
   let bestQ = -1;
   for (const part of String(acceptLanguage).split(',')) {
     const [tag, ...params] = part.trim().split(';');
     let base = tag.trim().toLowerCase().split('-')[0];
-    if (base === '*') base = DEFAULT_LANG; // «любой язык» (так по умолчанию пишет fetch в Node)
+    if (base === '*') base = DEFAULT_LANG; // "any language" (what Node's fetch sends by default)
     const qParam = params.map((p) => p.trim()).find((p) => p.startsWith('q='));
     const q = qParam ? Number(qParam.slice(2)) || 0 : 1;
     if (LANGS.includes(base) && q > bestQ) { best = base; bestQ = q; }
@@ -136,8 +138,8 @@ function magicLink(options = {}) {
   const maxAge = options.maxAge ?? COOKIE_MAX_AGE;
   const telegramToken = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
   const telegramChat = String(process.env.TELEGRAM_CHAT_ID || '').trim();
-  const usedLinks = new Map(); // одноразовые ссылки для входа: nonce -> срок (мс)
-  const attempts = new Map(); // ограничение частоты писем: ключ -> [время запросов]
+  const usedLinks = new Map(); // one-time sign-in links: nonce -> expiry (ms)
+  const attempts = new Map(); // email rate limiting: key -> [request times]
   if (!entries.length && !emails.size) {
     console.log(ownerText('[magic-link] neither ACCESS_TOKEN nor ACCESS_EMAILS is set: nobody can get in',
       '[magic-link] ACCESS_TOKEN и ACCESS_EMAILS не заданы: доступ закрыт для всех'));
@@ -178,7 +180,7 @@ function magicLink(options = {}) {
     res.end(body);
   }
 
-  // Поля формы: из req.body (express.urlencoded()) или прочитав поток сами.
+  // Form fields: from req.body (express.urlencoded()) or by reading the stream ourselves.
   function readForm(req, callback) {
     if (req.body !== undefined || req.readableEnded) return callback(new URLSearchParams(req.body || {}));
     let body = '';
@@ -189,10 +191,10 @@ function magicLink(options = {}) {
 
   function notifyRequest(req, contact) {
     const entry = { contact: String(contact || '').slice(0, 200), ip: clientIp(req), ua: String(req.headers['user-agent'] || '').slice(0, 200) };
-    // JSON.stringify экранирует переводы строк: пользователь не сможет подделать строки лога.
+    // JSON.stringify escapes newlines, so a user can't forge log lines.
     console.log('[access-request] ' + JSON.stringify(entry));
     if (!(telegramToken && telegramChat)) return;
-    // Без await: пользователь не ждёт Telegram. Без parse_mode — текст из формы ничего не разметит.
+    // No await: the user doesn't wait for Telegram. No parse_mode, so form text can't add markup.
     const api = String(process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/+$/, '');
     const hint = 'small access add ' + (EMAIL_RE.test(entry.contact) ? entry.contact : ownerText('NAME', 'ИМЯ'));
     const host = req.headers.host || ownerText('the app', 'приложению');
@@ -212,7 +214,7 @@ function magicLink(options = {}) {
     return emails.has(email) || emails.has('@' + email.slice(email.lastIndexOf('@') + 1));
   }
 
-  // purpose разводит ссылку для входа и сессию: одну нельзя выдать за другую.
+  // purpose keeps sign-in links and sessions apart: one can't be passed off as the other.
   const mac = (purpose, payload) => crypto.createHmac('sha256', secret).update(`${purpose}|${payload}`).digest('base64url');
   const sign = (purpose, data) => {
     const payload = Buffer.from(JSON.stringify(data)).toString('base64url');
@@ -250,8 +252,8 @@ function magicLink(options = {}) {
     return true;
   }
 
-  // Адрес приложения для ссылки в письме. Заголовку Host верим только локально: иначе злоумышленник подставил бы
-  // свой домен, и ссылка для входа из настоящего письма ушла бы к нему.
+  // App address for the link in the email. The Host header is trusted only locally: otherwise an attacker could
+  // substitute their own domain, and the sign-in link from a genuine email would go to them.
   function publicUrl(req) {
     const explicit = String(process.env.PUBLIC_URL || '').trim().replace(/\/+$/, '');
     if (explicit) return explicit;
@@ -277,7 +279,7 @@ function magicLink(options = {}) {
             '[magic-link] письмо для входа не отправлено: неизвестен адрес приложения. Задайте PUBLIC_URL'));
         } else {
           const token = sign('login', { e: email, x: Math.floor(Date.now() / 1000) + LINK_TTL, n: crypto.randomBytes(9).toString('base64url') });
-          // Без await: ответ не ждёт почту и одинаков для известных и неизвестных адресов.
+          // No await, so the response doesn't wait for mail and looks the same for unknown addresses.
           magicLink.sendLoginMail(email, `${appUrl}${VERIFY_PATH}?t=${encodeURIComponent(token)}`, new URL(appUrl).host,
             langOf(req));
         }
@@ -293,7 +295,7 @@ function magicLink(options = {}) {
       const data = unsign('login', token);
       const fresh = data && emailAllowed(data.e) && !usedLinks.has(data.n);
       if (!fresh) return page(req, res, 403, 'expired');
-      // Почтовые сканеры сами открывают ссылки из писем. Вход — только по кнопке, иначе сканер «потратит» ссылку.
+      // Mail scanners open emailed links on their own. Sign in only by button, or a scanner would use up the link.
       if (req.method !== 'POST') return page(req, res, 200, 'confirm', { email: data.e, token });
       const now = Date.now();
       for (const [nonce, expires] of usedLinks) if (expires < now) usedLinks.delete(nonce);
@@ -330,8 +332,8 @@ function magicLink(options = {}) {
       if (name === null) return page(req, res, 403, 'invalid');
       console.log(ownerText('[magic-link] signed in by link', '[magic-link] вход по ссылке')
         + (name ? ` (${name})` : '') + ', ip=' + clientIp(req));
-      // Убираем токен из адреса, чтобы он не оставался в истории браузера и не утекал через Referer.
-      // Ведущие слэши схлопываем: Location "//host" был бы открытым редиректом.
+      // Strip the token from the URL so it doesn't stay in browser history or leak through Referer.
+      // Collapse leading slashes: a Location of "//host" would be an open redirect.
       const full = new URL(req.originalUrl || req.url, 'http://localhost');
       full.searchParams.delete('token');
       res.writeHead(302, {
@@ -347,7 +349,7 @@ function magicLink(options = {}) {
   };
 }
 
-// "alice:tok1, tok2" -> [{name: "alice", token: "tok1"}, {name: "", token: "tok2"}]. В токене не должно быть ":".
+// "alice:tok1, tok2" -> [{name: "alice", token: "tok1"}, {name: "", token: "tok2"}]. A token must not contain ":".
 function parseTokens(raw) {
   const entries = [];
   for (const item of Array.isArray(raw) ? raw : String(raw).split(',')) {
@@ -359,7 +361,8 @@ function parseTokens(raw) {
   return entries;
 }
 
-// "Ivan@Company.com, @company.com, мусор" -> Set {"ivan@company.com", "@company.com"}: адреса и домены, без регистра.
+// "Ivan@Company.com, @company.com, junk" -> Set {"ivan@company.com", "@company.com"}: addresses and domains,
+// lowercased.
 function parseEmails(raw) {
   const found = new Set();
   for (const item of Array.isArray(raw) ? raw : String(raw).split(',')) {
@@ -369,7 +372,7 @@ function parseEmails(raw) {
   return found;
 }
 
-// Чем отправлять письма для входа: "log", "resend" или "" — не настроено.
+// How to send sign-in emails: "log", "resend" or "" (not set up).
 function mailMode() {
   if (['1', 'true', 'yes'].includes(String(process.env.LOGIN_LINKS_TO_LOG || '').trim().toLowerCase())) return 'log';
   if (String(process.env.RESEND_API_KEY || '').trim()) return 'resend';
@@ -401,23 +404,24 @@ async function sendLoginMail(email, link, appName, lang = DEFAULT_LANG) {
     if (!response.ok) throw new Error(`HTTP ${response.status} ${(await response.text()).slice(0, 200)}`);
     console.log(ownerText(`[magic-link] sign-in email sent: ${email}`, `[magic-link] письмо для входа отправлено: ${email}`));
   } catch (e) {
-    // Письмо — не повод ронять приложение; ключ в лог не пишем.
+    // A failed email is no reason to crash the app; the key stays out of the log.
     console.log(ownerText(`[magic-link] could not send the sign-in email to ${email}: `,
       `[magic-link] не удалось отправить письмо для входа на ${email}: `) + e.message);
   }
 }
 
-// Текст для владельца (лог, Telegram) — на его языке, OWNER_LANG. Посетитель видит язык своего браузера.
+// Text for the owner (log, Telegram) in their language, OWNER_LANG. Visitors see their browser's language.
 function ownerText(en, ru) {
   return String(process.env.OWNER_LANG || '').trim().toLowerCase().startsWith('ru') ? ru : en;
 }
 
-// В куке лежит не сам токен, а производное от него: убрали токен из ACCESS_TOKEN — его куки больше не подходят.
+// The cookie holds a value derived from the token, not the token itself: remove the token from ACCESS_TOKEN
+// and its cookies stop working.
 function cookieValue(token) {
   return crypto.createHmac('sha256', token).update('magic-link-cookie').digest('hex');
 }
 
-// Имя владельца секрета ("" — без имени) или null, если секрет не подошёл. pairs: [[имя, секрет], ...].
+// Name of the secret's owner ("" if unnamed), or null if the secret doesn't match. pairs: [[name, secret], ...].
 function owner(value, pairs) {
   if (value == null) return null;
   for (const [name, secret] of pairs) if (safeEqual(value, secret)) return name;
@@ -505,5 +509,5 @@ module.exports.magicLink = magicLink;
 module.exports.parseTokens = parseTokens;
 module.exports.parseEmails = parseEmails;
 module.exports.pickLang = pickLang;
-// Middleware вызывает magicLink.sendLoginMail — так тесты могут перехватить отправку письма.
+// The middleware calls magicLink.sendLoginMail, so tests can intercept sending the email.
 module.exports.sendLoginMail = sendLoginMail;

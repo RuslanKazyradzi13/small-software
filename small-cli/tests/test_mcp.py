@@ -1,6 +1,6 @@
-"""small mcp: MCP-сервер для ИИ-агентов — протокол и инструменты на моке Railway.
+"""small mcp: the MCP server for AI agents, the protocol and the tools against a Railway mock.
 
-Запуск: python -m unittest discover -s tests
+Run: python -m unittest discover -s tests
 """
 
 import io
@@ -30,7 +30,7 @@ class McpBase(unittest.TestCase):
         self.next_id = 0
 
     def request(self, method, params=None, **meta):
-        """Отправляет запрос; возвращает (ответ, уведомления, пришедшие до него)."""
+        """Sends a request; returns (the response, the notifications that arrived before it)."""
         self.next_id += 1
         message = {"jsonrpc": "2.0", "id": self.next_id, "method": method}
         if params is not None:
@@ -60,7 +60,7 @@ class ProtocolTest(McpBase):
         self.assertEqual(result["serverInfo"]["name"], "small")
         self.assertIn("tools", result["capabilities"])
         self.assertIn("share_app", result["instructions"])
-        response, _ = self.request("initialize", {"protocolVersion": "1999-01-01"})  # незнакомая — отвечаем своей
+        response, _ = self.request("initialize", {"protocolVersion": "1999-01-01"})  # unknown: we reply with ours
         self.assertEqual(response["result"]["protocolVersion"], mcp.PROTOCOL_VERSIONS[0])
 
     def test_tools_list(self):
@@ -68,11 +68,11 @@ class ProtocolTest(McpBase):
         names = [t["name"] for t in tools]
         self.assertEqual(names, ["init_app", "deploy_app", "share_app", "revoke_access", "list_access",
                                  "list_apps", "app_logs", "set_env"])
-        self.assertFalse([n for n in names if "destroy" in n or "delete" in n])  # удаление — только в терминале
+        self.assertFalse([n for n in names if "destroy" in n or "delete" in n])  # deleting is terminal-only
         for tool in tools:
             self.assertEqual(tool["inputSchema"]["type"], "object")
             self.assertTrue(set(tool["inputSchema"]["required"]) <= set(tool["inputSchema"]["properties"]))
-            self.assertIsNone(i18n_cyrillic(json.dumps(tool, ensure_ascii=False)))  # агентам — по-английски
+            self.assertIsNone(i18n_cyrillic(json.dumps(tool, ensure_ascii=False)))  # in English for agents
 
     def test_errors_and_notifications(self):
         self.assertEqual(self.request("ping")[0]["result"], {})
@@ -83,8 +83,8 @@ class ProtocolTest(McpBase):
             self.out.truncate()
             self.server.handle_line(raw)
             self.assertEqual(json.loads(self.out.getvalue())["error"]["code"], code)
-        for raw in (b'{"jsonrpc": "2.0", "method": "notifications/initialized"}\n',  # уведомление — без ответа
-                    b'{"jsonrpc": "2.0", "id": 9, "result": {}}\n'):  # чужой ответ — тоже
+        for raw in (b'{"jsonrpc": "2.0", "method": "notifications/initialized"}\n',  # a notification gets no response
+                    b'{"jsonrpc": "2.0", "id": 9, "result": {}}\n'):  # nor does a stray response
             self.out.seek(0)
             self.out.truncate()
             self.server.handle_line(raw)
@@ -105,7 +105,7 @@ class ProtocolTest(McpBase):
 
 
 class ToolsTest(McpBase):
-    """Сценарий агента: создать → задеплоить → поделиться → посмотреть → отозвать."""
+    """Agent scenario: create → deploy → share → look → revoke."""
 
     def setUp(self):
         super().setUp()
@@ -118,7 +118,7 @@ class ToolsTest(McpBase):
         env = mock.patch.dict(os.environ, {"RAILWAY_API_TOKEN": TOKEN, "SMALL_API_URL": self.railway.url})
         env.start()
         self.addCleanup(env.stop)
-        sleep = mock.patch("time.sleep")  # опрос статуса деплоя — без пауз
+        sleep = mock.patch("time.sleep")  # polling the deploy status without pauses
         sleep.start()
         self.addCleanup(sleep.stop)
 
@@ -133,7 +133,7 @@ class ToolsTest(McpBase):
         text, is_error, notes = self.call("deploy_app", progress_token="dep", path=self.app)
         self.assertFalse(is_error, text)
         url = "https://%s.up.railway.app" % self.config()["name"]
-        self.assertTrue(text.startswith(url), text)  # адрес — первой строкой, журнал ниже
+        self.assertTrue(text.startswith(url), text)  # the URL on the first line, the log below
         progress = [n["params"] for n in notes if n["method"] == "notifications/progress"]
         self.assertTrue(progress and all(p["progressToken"] == "dep" for p in progress))
         self.assertEqual([p["progress"] for p in progress], list(range(1, len(progress) + 1)))
@@ -143,7 +143,7 @@ class ToolsTest(McpBase):
         self.assertFalse(is_error, text)
         self.assertIn("ivan@company.com", self.config()["env"]["ACCESS_EMAILS"])
         self.assertIn("ivan@company.com", self.railway.service_vars["ACCESS_EMAILS"])
-        self.assertIn("small mail", text)  # почта не настроена — агент узнаёт, что сказать пользователю
+        self.assertIn("small mail", text)  # mail isn't set up: the agent learns what to tell the user
 
         text, is_error, _ = self.call("share_app", path=self.app, who="bob")
         self.assertFalse(is_error, text)
@@ -193,7 +193,7 @@ class ToolsTest(McpBase):
 
 
 class StdioTest(unittest.TestCase):
-    """Настоящий процесс `small mcp`: в stdout — только сообщения протокола, по одному в строке."""
+    """A real `small mcp` process: stdout carries only protocol messages, one per line."""
 
     def test_stdio_session(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,7 +213,7 @@ class StdioTest(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 60)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             lines = proc.stdout.decode("utf-8").splitlines()
-            replies = [json.loads(line) for line in lines]  # упадёт на любой посторонней строке
+            replies = [json.loads(line) for line in lines]  # fails on any stray line
             self.assertEqual([r["id"] for r in replies], [1, 2])
             self.assertFalse(replies[1]["result"]["isError"], replies[1])
             self.assertTrue(Path(tmp, "демо app", "small.json").is_file())

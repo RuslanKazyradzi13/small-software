@@ -1,6 +1,6 @@
-"""Файлы приложения: small.json (настройки пользователя) и .small.json (привязка к Railway).
+"""App files: small.json (user settings) and .small.json (the link to Railway).
 
-Используются `small deploy` и `small dashboard`, поэтому проверки одинаковы для обоих.
+Used by `small deploy` and `small dashboard`, so the checks are the same for both.
 """
 
 import json
@@ -8,8 +8,8 @@ import re
 
 from .i18n import tr
 
-CONFIG_FILE = "small.json"   # настройки пользователя: имя и переменные окружения
-STATE_FILE = ".small.json"   # куда CLI запоминает ID проекта, сервиса и домен
+CONFIG_FILE = "small.json"   # user settings: name and environment variables
+STATE_FILE = ".small.json"   # where the CLI remembers the project and service IDs and the domain
 CONFIG_KEYS = ("name", "env")
 ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -19,12 +19,12 @@ class ConfigError(Exception):
 
 
 def load_config(path):
-    """Читает small.json: {"name": "...", "env": {"KEY": "value"}}. Оба поля необязательны."""
+    """Reads small.json: {"name": "...", "env": {"KEY": "value"}}. Both fields are optional."""
     config = {"name": None, "env": {}}
     if not path.is_file():
         return config
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))  # -sig: Блокнот сохраняет с BOM
+        data = json.loads(path.read_text(encoding="utf-8-sig"))  # -sig: Notepad saves with a BOM
     except ValueError as e:
         raise ConfigError(tr("%s: invalid JSON (%s)", "%s: некорректный JSON (%s)") % (CONFIG_FILE, e)) from None
     if not isinstance(data, dict):

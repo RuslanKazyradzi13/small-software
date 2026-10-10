@@ -1,8 +1,8 @@
-"""small access: кто может открыть приложение. По почте (ACCESS_EMAILS) — как доступ к Google Doc, или по личной
-ссылке-приглашению (ACCESS_TOKEN). add выдаёт доступ, revoke отзывает, list показывает, у кого он есть.
+"""small access: who can open the app. By email (ACCESS_EMAILS), like access to a Google Doc, or by a personal
+invite link (ACCESS_TOKEN). add grants access, revoke takes it away, list shows who has it.
 
-Сама логика — в list_access / grant_access / revoke_access: их же вызывает кнопка «Поделиться» в small dashboard,
-команды здесь только печатают итог."""
+The logic itself is in list_access / grant_access / revoke_access: the "Share" button in small dashboard calls them
+too, the commands here only print the result."""
 
 import argparse
 
@@ -47,11 +47,11 @@ def register(sub):
 
 
 def list_access(root, warn=None):
-    """Кто может открыть приложение.
+    """Who can open the app.
 
-    {"emails": адреса и @домены, "entries": [(имя, токен)], "sources": откуда каждая переменная,
-     "mail": уходят ли письма для входа}. Токены нужны терминалу (первые символы — чтобы узнать ссылку);
-    дашборд отдаёт в браузер только имена.
+    {"emails": addresses and @domains, "entries": [(name, token)], "sources": where each variable comes from,
+     "mail": whether sign-in emails go out}. The terminal needs the tokens (their first characters identify a link);
+    the dashboard sends only the names to the browser.
     """
     env, sources = tokens.app_env(root, load_state(root / STATE_FILE), warn=warn)
     return {"emails": tokens.parse_emails(env.get("ACCESS_EMAILS")), "entries": tokens.parse(env.get("ACCESS_TOKEN")),
@@ -86,7 +86,7 @@ def cmd_access_list(args):
 
 
 def who_error():
-    """Ни почта, ни домен, ни имя: одна и та же подсказка в терминале и в дашборде."""
+    """Neither an email, nor a domain, nor a name: the same hint in the terminal and in the dashboard."""
     return CliError(tr("specify an email address (ivan@company.com), a domain (@company.com) or a name: "
                        "up to 40 characters, Latin letters, digits, _ . -",
                        "укажите адрес почты (ivan@company.com), домен (@company.com) или имя — до 40 символов: "
@@ -94,11 +94,12 @@ def who_error():
 
 
 def grant_access(root, who, deploy=True, warn=None):
-    """Выдаёт доступ почте, домену (@company.com) или по личной ссылке (имя): меняет small.json и переменные
-    в Railway, при deploy — перезапускает приложение. Пояснения по ходу — в warn, итог — словарём:
+    """Grants access to an email, a domain (@company.com) or via a personal link (a name): changes small.json and
+    the variables in Railway, with deploy restarts the app. Notes along the way go to warn, the result is a dict:
 
-    {"kind": "email" | "domain" | "link", "who", "linked": трогали ли Railway, "domain": домен из .small.json,
-     "token": токен новой ссылки (только "link"), "mail": уходят ли письма для входа (только почта и домен)}
+    {"kind": "email" | "domain" | "link", "who", "linked": whether Railway was touched, "domain": the domain from
+     .small.json, "token": the new link's token ("link" only), "mail": whether sign-in emails go out (email and
+     domain only)}
     """
     email = who.strip().lower()
     if tokens.is_email(email):
@@ -126,9 +127,9 @@ def _grant_email(root, email, deploy, warn):
         raise CliError(tr("%s is already on the access list", "%s уже есть в списке доступа") % email)
     changes = {"ACCESS_EMAILS": ", ".join(emails + [email])}
     if not env.get("SESSION_SECRET"):
-        changes["SESSION_SECRET"] = tokens.new_token()  # ключ подписи ссылок для входа и сессий
-    # Настоящий адрес для ссылок в письмах: RAILWAY_PUBLIC_DOMAIN после переименования домена устаревает.
-    # Свой PUBLIC_URL в small.json (например, свой домен) не трогаем.
+        changes["SESSION_SECRET"] = tokens.new_token()  # signing key for sign-in links and sessions
+    # The real address for links in emails: RAILWAY_PUBLIC_DOMAIN goes stale after the domain is renamed.
+    # A custom PUBLIC_URL in small.json (e.g. your own domain) is left alone.
     extra = {}
     if state.get("domain") and not load_config(root / CONFIG_FILE)["env"].get("PUBLIC_URL"):
         extra["PUBLIC_URL"] = "https://" + state["domain"]
@@ -164,7 +165,7 @@ def cmd_access_add(args):
 
 
 def mail_ready(env):
-    """Уходят ли письма для входа: настроен Resend, SMTP или режим проверки (ссылки — в лог приложения)."""
+    """Whether sign-in emails go out: Resend, SMTP or the test mode (links go to the app log) is set up."""
     return any(env.get(name) for name in tokens.MAIL_VARS)
 
 
@@ -174,8 +175,8 @@ def mail_warning():
 
 
 def revoke_access(root, who, deploy=True, warn=None):
-    """Отзывает доступ почты, домена или личной ссылки (who="" — общей ссылки без имени), у остальных он остаётся.
-    Меняет small.json и Railway, при deploy — перезапускает приложение. Итог: {"kind", "who", "linked"}."""
+    """Revokes access for an email, a domain or a personal link (who="" is the shared link without a name); the rest
+    keep theirs. Changes small.json and Railway, with deploy restarts the app. Result: {"kind", "who", "linked"}."""
     state = load_state(root / STATE_FILE)
     email = who.strip().lower()
     if tokens.is_email(email):

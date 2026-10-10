@@ -1,8 +1,8 @@
-"""small db: база данных для приложения в один шаг.
+"""small db: a database for the app in one step.
 
-add — разворачивает шаблон Railway (как `railway add --database`) в проекте приложения и передаёт приложению
-ссылку на базу через переменную-ссылку Railway (${{Postgres.DATABASE_URL}}), поэтому пароль нигде не хранится
-у нас. База записывается в .small.json, и small destroy удаляет её вместе с приложением.
+add deploys a Railway template (like `railway add --database`) into the app's project and passes the database URL
+to the app through a Railway reference variable (${{Postgres.DATABASE_URL}}), so the password is never stored
+on our side. The database is recorded in .small.json, and small destroy deletes it together with the app.
 """
 
 import argparse
@@ -14,7 +14,7 @@ from ..i18n import tr
 from ..railway import Railway, RailwayError
 from .env import add_no_deploy, change_env, report_env_change
 
-# Тип -> (код шаблона Railway, переменная приложения, переменная базы).
+# Type -> (Railway template code, app variable, database variable).
 DATABASES = {
     "postgres": ("postgres", "DATABASE_URL", "DATABASE_URL"),
 }
@@ -63,7 +63,7 @@ def cmd_db_list(args):
         try:
             deployment = api.instance_status(db["serviceId"], state["environmentId"])["deployment"]
             status = deployment["status"] if deployment else tr("no deploys", "нет деплоев")
-        except (RailwayError, KeyError, TypeError) as e:  # базу могли удалить в дашборде Railway
+        except (RailwayError, KeyError, TypeError) as e:  # the database may have been deleted in the Railway dashboard
             status = tr("unavailable: %s", "недоступна: %s") % e
         print("%-10s %-20s %s" % (db["type"], db["name"], status))
     return 0
@@ -82,7 +82,7 @@ def cmd_db_add(args):
     before = {s["id"] for s in api.project_services(project)[1]}
     template = api.template(template_code)
     config = template["serializedConfig"]
-    for service in config.get("services", {}).values():  # как `railway add`: значения по умолчанию шаблона
+    for service in config.get("services", {}).values():  # like `railway add`: the template's default values
         for variable in (service.get("variables") or {}).values():
             if variable and variable.get("defaultValue"):
                 variable["value"] = variable["defaultValue"]
@@ -99,7 +99,7 @@ def cmd_db_add(args):
                        % (", ".join(s["name"] for s in created) or "0"))
     service = created[0]
     state.setdefault("databases", []).append({"type": args.kind, "serviceId": service["id"], "name": service["name"]})
-    save_state(root / STATE_FILE, state)  # сразу: даже если дальше что-то упадёт, destroy удалит и базу
+    save_state(root / STATE_FILE, state)  # right away: even if something fails later, destroy deletes the database too
 
     reference = "${{%s.%s}}" % (service["name"], db_var)
     linked = change_env(root, {app_var: reference}, deploy=not args.no_deploy)

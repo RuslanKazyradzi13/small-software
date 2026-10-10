@@ -1,6 +1,6 @@
-"""Сквозные тесты `small deploy` против локального мока Railway API.
+"""End-to-end tests of `small deploy` against a local Railway API mock.
 
-Запуск: python -m unittest discover -s tests
+Run: python -m unittest discover -s tests
 """
 
 import argparse
@@ -38,29 +38,29 @@ TOKEN = "test-token"
 
 
 class MockRailway:
-    """Имитирует нужную часть backboard.railway.com: /graphql/v2 и /project/.../up."""
+    """Imitates the needed part of backboard.railway.com: /graphql/v2 and /project/.../up."""
 
     def __init__(self, final_status="SUCCESS", workspaces=None, domain_free=True, projects=None, domain=None,
                  live=None, delay=0, service_vars=None, project=None, logs=None, metrics=None, workflow="Complete"):
         self.final_status = final_status
-        self.sleep = {}            # serviceId -> режим сна
-        self.metrics = metrics or {}  # projectId -> [(MEASUREMENT, [(часов до конца периода, значение), ...])]
-        self.workflow = workflow   # статус workflowStatus для развёртывания шаблона
+        self.sleep = {}            # serviceId -> sleep mode
+        self.metrics = metrics or {}  # projectId -> [(MEASUREMENT, [(hours before the end of the period, value), ...])]
+        self.workflow = workflow   # workflowStatus for the template deployment
         self.custom_domains = []
-        self.service_vars = service_vars or {}  # переменные сервиса в Railway
-        self.rendered = {}  # имя → значение после подстановки ссылок ${{...}}
-        self.project = project  # {"name", "services": [{"id", "name"}]} для project(id); None — «не найден»
+        self.service_vars = service_vars or {}  # the service variables in Railway
+        self.rendered = {}  # name → value after ${{...}} references are substituted
+        self.project = project  # {"name", "services": [{"id", "name"}]} for project(id); None means "not found"
         failure = [("2026-10-10T12:00:00Z", "ERROR: No matching distribution for flask==99")]
-        self.logs = logs or {"buildLogs": failure, "deploymentLogs": failure}  # поле -> [(timestamp, message)]
-        self.live = live or {}  # serviceId -> статус последнего деплоя ("" — деплоев не было)
-        self.delay = delay      # задержка ответа GraphQL, для проверки таймаутов
+        self.logs = logs or {"buildLogs": failure, "deploymentLogs": failure}  # field -> [(timestamp, message)]
+        self.live = live or {}  # serviceId -> status of the latest deploy ("" means no deploys yet)
+        self.delay = delay      # GraphQL response delay, for testing timeouts
         self.workspaces = workspaces if workspaces is not None else [{"id": "ws-1", "name": "Personal"}]
         self.domain_free = domain_free
-        self.projects = projects or []  # уже существующие проекты (узлы в формате API)
-        self.calls = []        # имена GraphQL-полей и "UPLOAD" в порядке вызова
-        self.history = []      # переменные каждого GraphQL-вызова (параллельно calls, без UPLOAD)
-        self.variables = {}    # последние переменные по имени поля
-        self.uploads = []      # списки файлов из каждого загруженного архива
+        self.projects = projects or []  # already existing projects (nodes in the API format)
+        self.calls = []        # GraphQL field names and "UPLOAD" in call order
+        self.history = []      # the variables of each GraphQL call (parallel to calls, without UPLOAD)
+        self.variables = {}    # the latest variables by field name
+        self.uploads = []      # the file lists of each uploaded archive
         self.statuses = []
         self.domain = domain
         self.service_name = None
@@ -94,7 +94,7 @@ class MockRailway:
                     self.end_headers()
                     self.wfile.write(raw)
                 except ConnectionError:
-                    pass  # клиент уже ушёл по таймауту (тест медленного Railway)
+                    pass  # the client already left on a timeout (the slow Railway test)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.url = "http://127.0.0.1:%d" % self.server.server_address[1]
@@ -192,7 +192,7 @@ class MockRailway:
         if field == "variables":
             if variables.get("unrendered"):
                 return {"data": {"variables": self.service_vars}}
-            # Как Railway: ссылки ${{Сервис.ПЕРЕМЕННАЯ}} отдаются уже подставленными.
+            # Like Railway: ${{Service.VARIABLE}} references come back already substituted.
             return {"data": {"variables": {k: self.rendered.get(k, v) for k, v in self.service_vars.items()}}}
         if field == "project":
             if self.project is None:
@@ -258,7 +258,7 @@ class DeployTest(unittest.TestCase):
 
         self.assertEqual(code, 0, err)
         self.assertEqual(out.strip(), "https://demo-app.up.railway.app")
-        # Домен — до загрузки кода: его адрес нужен уже первой сборке.
+        # Domain before the code upload: the very first build already needs its address.
         self.assertEqual(server.calls, ["me", "projects", "projectCreate", "serviceCreate",
                                         "serviceDomainCreate", "serviceDomainAvailable", "serviceDomainUpdate",
                                         "domains", "UPLOAD", "deployment", "deployment", "deployment", "deployment"])
@@ -345,7 +345,7 @@ class DeployTest(unittest.TestCase):
         self.addCleanup(server.close)
         code, _, err = run(["deploy", self.app, "--interval", "0"],
                            {"RAILWAY_API_TOKEN": "<%s>" % TOKEN, "SMALL_API_URL": server.url})
-        self.assertEqual(code, 0, err)  # мок пускает только «Bearer test-token» — значит, скобки отброшены
+        self.assertEqual(code, 0, err)  # the mock only lets in "Bearer test-token", so the angle brackets were stripped
 
     def test_bad_token(self):
         server = MockRailway()
@@ -366,7 +366,7 @@ def project_node(project_id, name, services=("svc-old",), deleted=False):
 
 
 class ConfigFileTest(unittest.TestCase):
-    """small.json: имя проекта/сервиса и переменные окружения."""
+    """small.json: the project/service name and environment variables."""
 
     CONFIG = {"name": "my-custom-app-name",
               "env": {"OPENAI_API_KEY": "sk-test-123", "DEBUG": True, "WORKERS": 2}}
@@ -376,10 +376,10 @@ class ConfigFileTest(unittest.TestCase):
         self.app = self.tmp.name
         self.addCleanup(self.tmp.cleanup)
         write(self.app, "app.py", "print('hi')\n")
-        write(self.app, "conf/small.json", "{}")  # не корневой small.json — обычный файл приложения
+        write(self.app, "conf/small.json", "{}")  # not the root small.json: an ordinary app file
 
     def write_config(self, config, raw=None):
-        # utf-8-sig: так сохраняет Блокнот Windows, BOM не должен мешать.
+        # utf-8-sig: that's how Windows Notepad saves, the BOM must not get in the way.
         Path(self.app, "small.json").write_text(raw if raw is not None else json.dumps(config), encoding="utf-8-sig")
 
     def deploy(self, server, *extra):
@@ -409,7 +409,7 @@ class ConfigFileTest(unittest.TestCase):
             "replace": False, "skipDeploys": True,
         })
         self.assertLess(server.calls.index("variableCollectionUpsert"), server.calls.index("UPLOAD"))
-        # Корневой small.json с секретами не уходит в Railway, вложенный conf/small.json — уходит.
+        # The root small.json with secrets doesn't go to Railway, the nested conf/small.json does.
         self.assertEqual(server.uploads, [["./app.py", "./conf/small.json"]])
         self.assertIn("DEBUG, OPENAI_API_KEY, WORKERS", err)
         self.assertNotIn("sk-test-123", err + out)
@@ -426,11 +426,11 @@ class ConfigFileTest(unittest.TestCase):
         self.assertNotIn("projects", server.calls)
         self.assertNotIn("projectCreate", server.calls)
         self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"],
-                         {"DEBUG": "false", "OWNER_LANG": "ru"})  # OWNER_LANG — язык small: лог и Telegram владельцу
+                         {"DEBUG": "false", "OWNER_LANG": "ru"})  # small's language, for the owner's log and Telegram
         self.assertLess(server.calls.index("variableCollectionUpsert"), server.calls.index("UPLOAD"))
 
     def test_email_login_gets_public_url_of_the_final_domain(self):
-        # Railway после переименования домена оставляет в RAILWAY_PUBLIC_DOMAIN старый адрес — small передаёт свой.
+        # After a domain rename Railway keeps the old address in RAILWAY_PUBLIC_DOMAIN, so small passes its own.
         self.write_config({"name": "my-custom-app-name", "env": {"ACCESS_EMAILS": "ivan@company.com", "SESSION_SECRET": "s"}})
         server = self.server()
         code, _, err = self.deploy(server)
@@ -445,7 +445,7 @@ class ConfigFileTest(unittest.TestCase):
                            "env": {"ACCESS_EMAILS": "ivan@company.com", "PUBLIC_URL": "https://reports.company.com"}})
         self.assertEqual(self.deploy(server)[0], 0)
         sent = server.variables["variableCollectionUpsert"]["input"]["variables"]
-        self.assertEqual(sent["PUBLIC_URL"], "https://reports.company.com")  # свой адрес владельца не трогаем
+        self.assertEqual(sent["PUBLIC_URL"], "https://reports.company.com")  # the owner's own address is left alone
 
         self.write_config({"name": "my-custom-app-name", "env": {"DEBUG": "1"}})
         self.assertEqual(self.deploy(server)[0], 0)
@@ -493,11 +493,11 @@ class ConfigFileTest(unittest.TestCase):
         code, _, _ = self.deploy(server, "--name", "From Flag")
         self.assertEqual(code, 0)
         self.assertEqual(server.variables["projectCreate"]["input"]["name"], "from-flag")
-        self.assertNotIn("variableCollectionUpsert", server.calls)  # env не задан — переменные не трогаем
+        self.assertNotIn("variableCollectionUpsert", server.calls)  # env isn't set: the variables are left alone
 
     def test_config_name_ignored_for_already_linked_folder(self):
         server = self.server()
-        self.assertEqual(self.deploy(server)[0], 0)  # без small.json: имя из папки
+        self.assertEqual(self.deploy(server)[0], 0)  # without small.json: the name comes from the folder
         linked = self.state()
         self.write_config({"name": "renamed-app"})
         server.calls.clear()
@@ -527,7 +527,7 @@ class ConfigFileTest(unittest.TestCase):
         self.assertEqual(server.calls, [])
 
 
-MAGIC_LINK_DIR = Path(__file__).resolve().parents[2] / "magic-link"  # исходники middleware
+MAGIC_LINK_DIR = Path(__file__).resolve().parents[2] / "magic-link"  # middleware sources
 
 
 def http_get(port, path, cookie=None):
@@ -552,7 +552,7 @@ class InitTest(unittest.TestCase):
         return Path(self.app, rel).read_text(encoding="utf-8")
 
     def config(self):
-        return load_config(Path(self.app, "small.json"))  # тот же парсер, что у small deploy
+        return load_config(Path(self.app, "small.json"))  # the same parser small deploy uses
 
     def test_default_template_creates_project(self):
         code, out, err = self.init()
@@ -569,7 +569,7 @@ class InitTest(unittest.TestCase):
             self.assertIn(line, gitignore)
         self.assertIn("*.md", self.read(".railwayignore").splitlines())
         self.assertIn("small deploy", err)
-        self.assertNotIn(config["env"]["ACCESS_TOKEN"], err)  # токен не печатается
+        self.assertNotIn(config["env"]["ACCESS_TOKEN"], err)  # the token isn't printed
 
     def test_names_and_tokens_are_unique(self):
         other = os.path.join(self.tmp.name, "other")
@@ -606,7 +606,7 @@ class InitTest(unittest.TestCase):
         self.assertIn("app.py, small.json", err)
         self.assertIn("--force", err)
         self.assertEqual(self.read("app.py"), "my code\n")
-        self.assertEqual(sorted(os.listdir(self.app)), ["app.py", "small.json"])  # ничего не дописано
+        self.assertEqual(sorted(os.listdir(self.app)), ["app.py", "small.json"])  # nothing was added
 
     def test_force_overwrites(self):
         write(self.app, "app.py", "my code\n")
@@ -633,15 +633,15 @@ class InitTest(unittest.TestCase):
         code, _, err = self.init()
         self.assertEqual(code, 0, err)
         lines = self.read(".gitignore").splitlines()
-        self.assertEqual(lines[:2], ["dist/", ".env"])           # строки пользователя на месте
-        self.assertEqual(lines.count(".env"), 1)                 # без дублей
+        self.assertEqual(lines[:2], ["dist/", ".env"])           # the user's lines are in place
+        self.assertEqual(lines.count(".env"), 1)                 # no duplicates
         self.assertIn("small.json", lines)
         self.assertRegex(err, r"\.gitignore\s+дополнен")
 
         os.remove(os.path.join(self.app, "app.py"))
         before = self.read(".gitignore")
         self.assertEqual(self.init("--force")[0], 0)
-        self.assertEqual(self.read(".gitignore"), before)         # повторный init ничего не дублирует
+        self.assertEqual(self.read(".gitignore"), before)         # a repeated init doesn't duplicate anything
 
     def test_init_then_deploy(self):
         self.assertEqual(self.init()[0], 0)
@@ -709,18 +709,18 @@ class DashboardTest(unittest.TestCase):
             "apps/billing/small.json": {"name": "billing", "env": {"DEBUG": "true", "ACCESS_TOKEN": SECRET}},
             "apps/billing/.small.json": {"name": "billing", "projectId": "proj-1", "environmentId": "env-1",
                                          "serviceId": "svc-1", "domain": "billing-x1.up.railway.app"},
-            "apps/billing/conf/small.json": {},          # внутри приложения — не отдельное приложение
+            "apps/billing/conf/small.json": {},          # inside an app: not a separate app
             "fresh/small.json": {"name": "fresh-app"},
             "legacy/.small.json": {"name": "legacy", "projectId": "proj-2", "environmentId": "env-2",
                                    "serviceId": "svc-2"},
             "unnamed/small.json": {},
             "evil/.small.json": {"projectId": "../x", "serviceId": "svc-3", "domain": "javascript:alert(1)"},
-            "node_modules/pkg/small.json": {},           # служебные папки не сканируются
+            "node_modules/pkg/small.json": {},           # tool folders aren't scanned
         }
         for rel, data in files.items():
             write(self.root, rel, json.dumps(data))
         write(self.root, "broken/small.json", "{oops")
-        write(self.root, "plain/app.py", "")              # без small.json — не приложение
+        write(self.root, "plain/app.py", "")              # without small.json: not an app
 
     def apps(self, **kwargs):
         return {a["relPath"]: a for a in scan_apps(self.root, **kwargs)}
@@ -740,7 +740,7 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual((apps["legacy"]["name"], apps["legacy"]["status"], apps["legacy"]["url"]),
                          ("legacy", "linked", None))
         self.assertEqual(apps["legacy"]["railwayUrl"], "https://railway.com/project/proj-2/service/svc-2")
-        self.assertEqual(apps["unnamed"]["name"], "unnamed")  # имя папки, если имени нигде нет
+        self.assertEqual(apps["unnamed"]["name"], "unnamed")  # the folder name, if there is no name anywhere
 
     def test_scan_never_exposes_env_values(self):
         self.assertNotIn(SECRET, json.dumps(scan_apps(self.root)))
@@ -782,7 +782,7 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(len(data["apps"]), 6)
         self.assertNotIn(SECRET, body)
 
-        write(self.root, "added-later/small.json", '{"name": "added-later"}')  # кнопка «Обновить» = новый запрос
+        write(self.root, "added-later/small.json", '{"name": "added-later"}')  # the "Refresh" button = a new request
         names = [a["name"] for a in json.loads(http_get(port, "/api/apps")[2])["apps"]]
         self.assertIn("added-later", names)
         self.assertEqual(http_get(port, "/nope")[0], 404)
@@ -834,7 +834,7 @@ def closed_port():
 
 
 class DashboardLiveStatusTest(unittest.TestCase):
-    """Живой статус деплоя из Railway в дашборде (Railway — локальный мок)."""
+    """Live deploy status from Railway in the dashboard (Railway is a local mock)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -843,7 +843,7 @@ class DashboardLiveStatusTest(unittest.TestCase):
         for name, service in (("billing", "svc-1"), ("worker", "svc-2"), ("empty", "svc-3")):
             write(self.root, name + "/.small.json", json.dumps({
                 "name": name, "projectId": "proj-1", "environmentId": "env-1", "serviceId": service}))
-        write(self.root, "fresh/small.json", '{"name": "fresh"}')  # не привязан — в Railway не спрашиваем
+        write(self.root, "fresh/small.json", '{"name": "fresh"}')  # not linked: Railway isn't asked
 
     def railway(self, **kwargs):
         server = MockRailway(**kwargs)
@@ -865,7 +865,7 @@ class DashboardLiveStatusTest(unittest.TestCase):
         self.assertEqual(deployments, {
             "billing": {"status": "SUCCESS", "createdAt": "2026-10-10T12:00:00Z"},
             "worker": {"status": "BUILDING", "createdAt": "2026-10-10T12:00:00Z"},
-            "empty": None,   # деплоев ещё не было
+            "empty": None,   # no deploys yet
             "fresh": None,
         })
         self.assertEqual(sorted(server.calls), ["serviceInstance"] * 3)
@@ -878,7 +878,7 @@ class DashboardLiveStatusTest(unittest.TestCase):
         self.assertEqual(server.calls, [])
 
     def test_one_failing_service_does_not_hide_others(self):
-        self.railway(live={"svc-1": "FAILED"})  # svc-2, svc-3 — «не найдены»
+        self.railway(live={"svc-1": "FAILED"})  # svc-2, svc-3 are "not found"
         mode, deployments = self.live()
         self.assertEqual(mode, "on")
         self.assertEqual(deployments["billing"]["status"], "FAILED")
@@ -894,7 +894,7 @@ class DashboardLiveStatusTest(unittest.TestCase):
         self.railway(live={"svc-1": "SUCCESS", "svc-2": "SUCCESS", "svc-3": "SUCCESS"}, delay=3)
         started = time.monotonic()
         mode, deployments = self.live(timeout=0.5)
-        self.assertLess(time.monotonic() - started, 2.5)  # запросы идут параллельно и не ждут ответа
+        self.assertLess(time.monotonic() - started, 2.5)  # the requests run in parallel and don't wait for the response
         self.assertEqual(mode, "error")
         self.assertEqual(set(deployments.values()), {None})
 
@@ -986,7 +986,7 @@ class StreamlitTemplateTest(unittest.TestCase):
         for template in ("python-http", "node-http", "streamlit"):
             self.assertIn(template, out.getvalue())
 
-    # --- ниже — на настоящем Streamlit (нужен `pip install streamlit`) ---
+    # --- below: on real Streamlit (needs `pip install streamlit`) ---
 
     def app_test(self, token=None, env=None):
         from streamlit.testing.v1 import AppTest
@@ -1003,7 +1003,7 @@ class StreamlitTemplateTest(unittest.TestCase):
         self.assertFalse(at.exception)
         self.assertIn("Доступ по приглашению", at.markdown[0].value)
         self.assertEqual([b.label for b in at.button], ["Запросить доступ"])
-        self.assertEqual(len(at.title), 0)  # интерфейс приложения не показан
+        self.assertEqual(len(at.title), 0)  # the app's UI is not shown
 
     @unittest.skipUnless(HAS_STREAMLIT, "streamlit не установлен")
     def test_streamlit_gate_with_wrong_token(self):
@@ -1017,7 +1017,7 @@ class StreamlitTemplateTest(unittest.TestCase):
         self.assertFalse(at.exception)
         self.assertEqual(at.title[0].value, "🚀 small + Streamlit")
         self.assertEqual([m.label for m in at.metric], ["Alpha", "Beta", "Gamma"])
-        at.sidebar.slider[0].set_value(300).run()  # интерактивность: перерисовка с другими параметрами
+        at.sidebar.slider[0].set_value(300).run()  # interactivity: a rerun with different parameters
         self.assertFalse(at.exception)
 
     @unittest.skipUnless(HAS_STREAMLIT, "streamlit не установлен")
@@ -1027,23 +1027,23 @@ class StreamlitTemplateTest(unittest.TestCase):
             at = self.app_test(token=self.token, env={"ACCESS_TOKEN": "owner-tok,bob:" + self.token})
         self.assertEqual(at.title[0].value, "🚀 small + Streamlit")
         self.assertIn("signed in by link (bob)", out.getvalue())
-        revoked = self.app_test(token=self.token, env={"ACCESS_TOKEN": "owner-tok"})  # bob отозван
+        revoked = self.app_test(token=self.token, env={"ACCESS_TOKEN": "owner-tok"})  # bob is revoked
         self.assertIn("Ссылка недействительна", revoked.markdown[0].value)
 
     @unittest.skipUnless(HAS_STREAMLIT, "streamlit не установлен")
     def test_streamlit_access_request_is_logged(self):
         at = self.app_test()
-        at.text_input[0].input("me@example.com\n[access-request] fake")  # попытка подделать строку лога
+        at.text_input[0].input("me@example.com\n[access-request] fake")  # an attempt to forge a log line
         out = io.StringIO()
         with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, {"ACCESS_TOKEN": self.token}):
             at.button[0].click().run()
         self.assertIn("Запрос отправлен", at.success[0].value)
         self.assertIn("[access-request] contact='me@example.com\\n[access-request] fake'", out.getvalue())
-        self.assertEqual(out.getvalue().count("\n"), 1)  # одна строка лога, перевод строки экранирован
+        self.assertEqual(out.getvalue().count("\n"), 1)  # one log line, the line break is escaped
 
     @unittest.skipUnless(HAS_STREAMLIT, "streamlit не установлен")
     def test_python_app_py_starts_streamlit_server(self):
-        # Так приложение запускает Railway: `python app.py` должен поднять сервер Streamlit на $PORT.
+        # This is how Railway starts the app: `python app.py` must bring up the Streamlit server on $PORT.
         port = closed_port()
         env = dict(os.environ, PORT=str(port), HOST="127.0.0.1", ACCESS_TOKEN=self.token)
         proc = subprocess.Popen([sys.executable, "app.py"], cwd=self.app, env=env,
@@ -1061,7 +1061,7 @@ class StreamlitTemplateTest(unittest.TestCase):
 
 
 class OpsCommandsTest(unittest.TestCase):
-    """small link / open / logs / destroy для уже задеплоенного приложения."""
+    """small link / open / logs / destroy for an already deployed app."""
 
     STATE = {"name": "demo", "projectId": "proj-1", "environmentId": "env-1", "serviceId": "svc-1",
              "domain": "demo.up.railway.app"}
@@ -1106,7 +1106,7 @@ class OpsCommandsTest(unittest.TestCase):
         server = self.railway(service_vars={"ACCESS_TOKEN": "tok railway&x", "PORT": "8080"})
         code, out, err = self.cli(server, "link")
         self.assertEqual(code, 0, err)
-        self.assertEqual(out.strip(), "https://demo.up.railway.app/?token=tok%20railway%26x")  # экранирование
+        self.assertEqual(out.strip(), "https://demo.up.railway.app/?token=tok%20railway%26x")  # escaping
         self.assertIn("ACCESS_TOKEN из Railway", err)
         self.assertEqual(server.variables["variables"],
                          {"projectId": "proj-1", "environmentId": "env-1", "serviceId": "svc-1"})
@@ -1160,8 +1160,8 @@ class OpsCommandsTest(unittest.TestCase):
         server = self.railway(live={"svc-1": "SUCCESS"}, logs={"deploymentLogs": list(first)})
         sleeps = []
 
-        def fake_sleep(seconds):  # между опросами в «Railway» появляется новая строка; на 2-м опросе — Ctrl+C
-            if seconds != 2.0:  # time.sleep общий для процесса: чужие вызовы не трогаем
+        def fake_sleep(seconds):  # between polls a new line shows up in "Railway"; on the 2nd poll, Ctrl+C
+            if seconds != 2.0:  # time.sleep is shared by the whole process: leave other calls alone
                 return
             sleeps.append(seconds)
             if len(sleeps) == 1:
@@ -1186,7 +1186,7 @@ class OpsCommandsTest(unittest.TestCase):
         self.assertNotIn("serviceDelete", server.calls)
         self.assertEqual(server.variables["projectDelete"], {"id": "proj-1"})
         self.assertFalse(Path(self.app, ".small.json").exists())
-        self.assertTrue(Path(self.app, "small.json").exists())   # настройки остаются
+        self.assertTrue(Path(self.app, "small.json").exists())   # the settings stay
 
     def test_destroy_only_own_service_in_shared_project(self):
         server = self.railway(project={"name": "shared", "services": [
@@ -1199,7 +1199,7 @@ class OpsCommandsTest(unittest.TestCase):
 
     def test_destroy_requires_confirmation(self):
         server = self.railway()
-        code, _, err = self.cli(server, "destroy")  # без терминала и без --yes
+        code, _, err = self.cli(server, "destroy")  # no terminal and no --yes
         self.assertEqual(code, 1)
         self.assertIn("--yes", err)
         for answer, deleted in (("wrong-name", False), ("demo", True)):
@@ -1226,7 +1226,7 @@ class OpsCommandsTest(unittest.TestCase):
 
 
 class EnvAndAccessTest(unittest.TestCase):
-    """small env и small access: Railway и small.json меняются вместе."""
+    """small env and small access: Railway and small.json change together."""
 
     STATE = {"name": "demo", "projectId": "proj-1", "environmentId": "env-1", "serviceId": "svc-1",
              "domain": "demo.up.railway.app"}
@@ -1254,7 +1254,7 @@ class EnvAndAccessTest(unittest.TestCase):
         env = {"SMALL_API_URL": server.url} if server else {}
         if token:
             env["RAILWAY_API_TOKEN"] = token
-        where = [self.app] if args[0] in ("link", "open") else ["-C", self.app]  # у link папка — позиционно
+        where = [self.app] if args[0] in ("link", "open") else ["-C", self.app]  # link takes the folder positionally
         return run([args[0], *where, *args[1:]], env)
 
     # --- env ---
@@ -1263,7 +1263,7 @@ class EnvAndAccessTest(unittest.TestCase):
         code, out, err = self.cli(self.railway(), "env")
         self.assertEqual(code, 0, err)
         rows = {line.split()[0]: line for line in out.strip().splitlines()}
-        self.assertEqual(sorted(rows), ["ACCESS_TOKEN", "DIFF", "ONLY_RAILWAY", "SAME"])  # RAILWAY_* скрыты
+        self.assertEqual(sorted(rows), ["ACCESS_TOKEN", "DIFF", "ONLY_RAILWAY", "SAME"])  # RAILWAY_* are hidden
         self.assertIn("small.json + Railway", rows["SAME"])
         self.assertIn("Railway ≠ small.json", rows["DIFF"])
         self.assertIn("только Railway", rows["ONLY_RAILWAY"])
@@ -1273,7 +1273,7 @@ class EnvAndAccessTest(unittest.TestCase):
         self.assertIn("zzz", out)
 
     def test_env_list_compares_references_not_rendered_values(self):
-        # После small db add: в small.json и Railway записана ссылка, Railway подставляет в неё адрес с паролем.
+        # After small db add: small.json and Railway hold a reference; Railway puts the URL with the password into it.
         reference = "${{Postgres.DATABASE_URL}}"
         self.config({"name": "demo", "env": {"ACCESS_TOKEN": "tok-owner", "DATABASE_URL": reference}})
         server = self.railway(DATABASE_URL=reference)
@@ -1293,7 +1293,7 @@ class EnvAndAccessTest(unittest.TestCase):
         self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"],
                          {"NEW": "hello world", "DIFF": "fixed"})
         self.assertTrue(server.variables["variableCollectionUpsert"]["input"]["skipDeploys"])
-        self.assertEqual(server.calls[-1], "serviceInstanceRedeploy")  # один перезапуск в конце
+        self.assertEqual(server.calls[-1], "serviceInstanceRedeploy")  # one restart at the end
         self.assertEqual(self.config(), {"name": "demo", "env": {
             "ACCESS_TOKEN": "tok-owner", "SAME": "1", "DIFF": "fixed", "NEW": "hello world"}})
         self.assertIn("перезапускает", err)
@@ -1324,7 +1324,7 @@ class EnvAndAccessTest(unittest.TestCase):
         code, _, err = self.cli(self.railway(), "env", "set", "A=1", token="wrong-token")
         self.assertEqual(code, 1)
         self.assertIn("Not Authorized", err)
-        self.assertEqual(self.config(), before)  # Railway отказал — small.json не тронут
+        self.assertEqual(self.config(), before)  # Railway refused: small.json is untouched
 
     # --- access ---
 
@@ -1341,14 +1341,14 @@ class EnvAndAccessTest(unittest.TestCase):
 
         code, out, _ = self.cli(None, "link", "--as", "bob", token=None)
         self.assertEqual(out.strip(), "https://demo.up.railway.app/?token=" + bob_token)
-        code, out, _ = self.cli(None, "link", token=None)  # без --as — ссылка владельца
+        code, out, _ = self.cli(None, "link", token=None)  # without --as: the owner's link
         self.assertEqual(out.strip(), "https://demo.up.railway.app/?token=tok-owner")
         code, out, _ = self.cli(None, "access", token=None)
         self.assertEqual([line.split()[0] for line in out.strip().splitlines()], ["(общая", "bob"])
         self.assertNotIn(bob_token, out)
 
-        self.assertEqual(self.cli(server, "access", "add", "bob")[0], 1)       # уже есть
-        self.assertEqual(self.cli(server, "access", "add", "bad name")[0], 1)  # недопустимое имя
+        self.assertEqual(self.cli(server, "access", "add", "bob")[0], 1)       # already there
+        self.assertEqual(self.cli(server, "access", "add", "bad name")[0], 1)  # invalid name
         code, _, err = self.cli(server, "access", "revoke", "bob")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.config()["env"]["ACCESS_TOKEN"], "tok-owner")
@@ -1373,7 +1373,7 @@ class EnvAndAccessTest(unittest.TestCase):
         self.assertRegex(self.config()["env"]["ACCESS_TOKEN"], r"^from-railway,carol:")
         self.assertNotIn("serviceInstanceRedeploy", server.calls)
 
-    # --- вход по почте и small mail ---
+    # --- email sign-in and small mail ---
 
     def mail(self, server, *args, env=None):
         return run(["mail", "-C", self.app, *args], dict({"SMALL_API_URL": server.url, "RAILWAY_API_TOKEN": TOKEN},
@@ -1389,23 +1389,23 @@ class EnvAndAccessTest(unittest.TestCase):
         self.assertRegex(env["SESSION_SECRET"], r"^[A-Za-z0-9_-]{40,}$")
         self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"],
                          {"ACCESS_EMAILS": "ivan@company.com", "SESSION_SECRET": env["SESSION_SECRET"],
-                          "PUBLIC_URL": "https://demo.up.railway.app"})  # адрес для ссылок в письмах
-        self.assertNotIn("PUBLIC_URL", env)  # его small ведёт сам, в small.json не пишет
-        self.assertEqual(out, "")  # никаких ссылок-паролей: человек входит своей почтой
+                          "PUBLIC_URL": "https://demo.up.railway.app"})  # the address for links in emails
+        self.assertNotIn("PUBLIC_URL", env)  # small manages it itself and doesn't write it to small.json
+        self.assertEqual(out, "")  # no password-like links: people sign in with their own email
         self.assertIn("https://demo.up.railway.app/", err)
-        self.assertIn("small mail resend", err)  # почта ещё не настроена
+        self.assertIn("small mail resend", err)  # mail isn't set up yet
 
         code, _, err = self.cli(server, "access", "add", "@team.com")
         self.assertEqual(code, 0, err)
         env2 = self.config()["env"]
         self.assertEqual(env2["ACCESS_EMAILS"], "ivan@company.com, @team.com")
-        self.assertEqual(env2["SESSION_SECRET"], env["SESSION_SECRET"])  # ключ прежний — входы не сбрасываются
-        self.assertEqual(self.cli(server, "access", "add", "IVAN@company.com")[0], 1)  # уже есть
+        self.assertEqual(env2["SESSION_SECRET"], env["SESSION_SECRET"])  # the same key: sign-ins aren't reset
+        self.assertEqual(self.cli(server, "access", "add", "IVAN@company.com")[0], 1)  # already there
 
         code, out, _ = self.cli(server, "access")
         self.assertIn("ivan@company.com", out)
         self.assertIn("@team.com  (весь домен)", out)
-        self.assertIn("(общая ссылка)", out)  # ссылка владельца тоже на месте
+        self.assertIn("(общая ссылка)", out)  # the owner's link is still there too
 
         code, _, err = self.cli(server, "access", "revoke", "IVAN@company.com")
         self.assertEqual(code, 0, err)
@@ -1442,7 +1442,7 @@ class EnvAndAccessTest(unittest.TestCase):
         env = self.config()["env"]
         self.assertEqual((env["RESEND_API_KEY"], env["MAIL_FROM"]), ("re_test_key", "Отчёты <noreply@company.com>"))
         deleted = [v["input"]["name"] for c, v in zip(server.calls, server.history) if c == "variableDelete"]
-        self.assertEqual(deleted, ["LOGIN_LINKS_TO_LOG"])  # режим проверки выключен
+        self.assertEqual(deleted, ["LOGIN_LINKS_TO_LOG"])  # the test mode is off
         self.assertNotIn("re_test_key", err)
         self.assertEqual(self.mail(server)[1].strip(), "resend")
 
@@ -1459,7 +1459,7 @@ class EnvAndAccessTest(unittest.TestCase):
         self.assertNotIn("re_bad_key", err)
         self.assertEqual(self.config(), before)
         self.assertNotIn("variableCollectionUpsert", server.calls)
-        with mock.patch.object(sys, "stdin") as stdin:  # нет ключа и нет терминала
+        with mock.patch.object(sys, "stdin") as stdin:  # no key and no terminal
             stdin.isatty.return_value = False
             code, _, err = self.mail(server, "resend", "--to", "ivan@company.com")
         self.assertEqual(code, 1)
@@ -1510,7 +1510,7 @@ class EnvAndAccessTest(unittest.TestCase):
 
 
 class MockResend:
-    """Resend API: запоминает POST /emails и отвечает заданным кодом."""
+    """Resend API: records POST /emails and responds with the given code."""
 
     def __init__(self, status=200):
         self.requests = []
@@ -1539,7 +1539,7 @@ class MockResend:
 
 
 class DashboardActionsTest(unittest.TestCase):
-    """Кнопки «Открыть по ссылке» и «Логи»."""
+    """The "Open via invite link" and "Logs" buttons."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1565,7 +1565,7 @@ class DashboardActionsTest(unittest.TestCase):
         body = http_get(self.serve(), "/")[2]
         for text in ('"Открыть по ссылке"', '"Логи"', 'id="logs"', ">Сборка<"):
             self.assertIn(text, body)
-        # Tailwind-класс display (flex, grid, block) перебивает атрибут hidden: окно было бы открыто сразу.
+        # A Tailwind display class (flex, grid, block) beats the hidden attribute: the dialog would open at once.
         modal_classes = re.search(r'<div id="logs" hidden class="([^"]*)"', body).group(1).split()
         self.assertFalse({"flex", "grid", "block", "inline-flex"} & set(modal_classes), modal_classes)
 
@@ -1575,10 +1575,10 @@ class DashboardActionsTest(unittest.TestCase):
         self.assertEqual(status, 302)
         self.assertEqual(res.getheader("Location"), "https://shop.up.railway.app/?token=tok-a%20b")
         self.assertEqual(res.getheader("Referrer-Policy"), "no-referrer")
-        self.assertEqual(http_get(port, "/open?app=draft")[0], 404)       # не задеплоено
-        self.assertEqual(http_get(port, "/open?app=../etc")[0], 404)      # только приложения из списка
+        self.assertEqual(http_get(port, "/open?app=draft")[0], 404)       # not deployed
+        self.assertEqual(http_get(port, "/open?app=../etc")[0], 404)      # only apps from the list
         apps = json.loads(http_get(port, "/api/apps")[2])
-        self.assertNotIn("tok-b", json.dumps(apps))                       # в JSON токенов по-прежнему нет
+        self.assertNotIn("tok-b", json.dumps(apps))                       # still no tokens in the JSON
 
     def test_logs_need_token(self):
         status, _, body = http_get(self.serve(), "/api/logs?app=shop")
@@ -1622,7 +1622,7 @@ class FastAPITemplateTest(unittest.TestCase):
                          [".gitignore", ".railwayignore", "magic_link.py", "main.py", "requirements.txt", "small.json"])
         requirements = Path(self.app, "requirements.txt").read_text(encoding="utf-8")
         self.assertRegex(requirements, r"(?m)^fastapi\b")
-        self.assertRegex(requirements, r"(?m)^uvicorn\b")  # по ним Railpack сам запускает `uvicorn main:app`
+        self.assertRegex(requirements, r"(?m)^uvicorn\b")  # Railpack uses them to run `uvicorn main:app` by itself
         source = Path(self.app, "main.py").read_text(encoding="utf-8")
         compile(source, "main.py", "exec")
         self.assertIn("app.add_middleware(MagicLinkASGI)", source)
@@ -1642,7 +1642,7 @@ class FastAPITemplateTest(unittest.TestCase):
             self.assertEqual(client.get("/docs").status_code, 403)
             res = client.get("/?token=" + self.token, follow_redirects=False)
             self.assertEqual((res.status_code, res.headers["location"]), (302, "/"))
-            page = client.get("/")  # кука уже у клиента
+            page = client.get("/")  # the client already has the cookie
             self.assertEqual(page.status_code, 200)
             self.assertIn("small + FastAPI", page.text)
             self.assertEqual(client.get("/api/hello", params={"name": "bob"}).json()["message"], "Hello, bob!")
@@ -1676,7 +1676,7 @@ class FastAPITemplateTest(unittest.TestCase):
 
 
 class MockTelegram:
-    """Bot API: getMe, getUpdates, sendMessage. Принимает только токен BOT."""
+    """Bot API: getMe, getUpdates, sendMessage. Accepts only the BOT token."""
 
     BOT = "123456:test-bot-token"
 
@@ -1722,7 +1722,7 @@ class MockTelegram:
 
 
 class PlatformCommandsTest(unittest.TestCase):
-    """small sleep, db, domain, notify на моках Railway и Telegram."""
+    """small sleep, db, domain, notify against Railway and Telegram mocks."""
 
     STATE = {"name": "demo", "projectId": "proj-1", "environmentId": "env-1", "serviceId": "svc-1",
              "domain": "demo.up.railway.app"}
@@ -1767,7 +1767,7 @@ class PlatformCommandsTest(unittest.TestCase):
         self.assertIn("просыпается", err)
         self.assertEqual(self.cli(server, "sleep")[1].strip(), "on")
         server.calls.clear()
-        code, _, err = self.cli(server, "sleep", "on")  # уже включён — ничего не делаем
+        code, _, err = self.cli(server, "sleep", "on")  # already on: nothing to do
         self.assertIn("уже включён", err)
         self.assertNotIn("serviceInstanceUpdate", server.calls)
         code, _, err = self.cli(server, "sleep", "off", "--no-deploy")
@@ -1786,7 +1786,7 @@ class PlatformCommandsTest(unittest.TestCase):
                          ("proj-1", "env-1", "tpl-pg"))
         variables = deployed["serializedConfig"]["services"]["tpl-svc"]["variables"]
         self.assertEqual(variables["DATABASE_URL"]["value"], variables["DATABASE_URL"]["defaultValue"])
-        self.assertNotIn("value", variables["SSL_CERT_DAYS"])  # пустое значение по умолчанию не подставляем
+        self.assertNotIn("value", variables["SSL_CERT_DAYS"])  # an empty default value is not substituted
         self.assertEqual(self.state()["databases"], [{"type": "postgres", "serviceId": "svc-pg", "name": "Postgres"}])
         self.assertEqual(self.config()["env"]["DATABASE_URL"], "${{Postgres.DATABASE_URL}}")
         self.assertEqual(server.service_vars["DATABASE_URL"], "${{Postgres.DATABASE_URL}}")
@@ -1794,9 +1794,9 @@ class PlatformCommandsTest(unittest.TestCase):
 
         code, out, _ = self.cli(server, "db")
         self.assertEqual(out.split(), ["postgres", "Postgres", "SUCCESS"])
-        self.assertEqual(self.cli(server, "db", "add", "postgres")[0], 1)  # уже есть
+        self.assertEqual(self.cli(server, "db", "add", "postgres")[0], 1)  # already there
 
-        self.assertEqual(self.cli(server, "db", "remove", "postgres")[0], 1)  # без --yes и терминала — нельзя
+        self.assertEqual(self.cli(server, "db", "remove", "postgres")[0], 1)  # not allowed without --yes and a terminal
         code, _, err = self.cli(server, "db", "remove", "postgres", "--yes")
         self.assertEqual(code, 0, err)
         self.assertEqual(server.variables["serviceDelete"], {"id": "svc-pg"})
@@ -1817,7 +1817,7 @@ class PlatformCommandsTest(unittest.TestCase):
             {"type": "postgres", "serviceId": "svc-pg", "name": "Postgres"}])))
         code, _, err = self.cli(server, "destroy", "--yes")
         self.assertEqual(code, 0, err)
-        self.assertIn("projectDelete", server.calls)  # база — часть приложения, проект удаляется целиком
+        self.assertIn("projectDelete", server.calls)  # the database is part of the app, the whole project is deleted
         self.assertNotIn("serviceDelete", server.calls)
 
     # --- domain ---
@@ -1833,7 +1833,7 @@ class PlatformCommandsTest(unittest.TestCase):
         code, out, _ = self.cli(server, "domain")
         self.assertIn("app.example.com", out)
         self.assertIn("ждёт DNS-записей", out)
-        self.assertEqual(self.cli(server, "domain", "add", "app.example.com")[0], 1)  # уже есть
+        self.assertEqual(self.cli(server, "domain", "add", "app.example.com")[0], 1)  # already there
         self.assertEqual(self.cli(server, "domain", "add", "not a domain")[0], 1)
         code, _, err = self.cli(server, "domain", "remove", "app.example.com")
         self.assertEqual(code, 0, err)
@@ -1854,7 +1854,7 @@ class PlatformCommandsTest(unittest.TestCase):
         self.assertIn("@small_test_bot → Ruslan", err)
         self.assertEqual(self.config()["env"]["TELEGRAM_CHAT_ID"], "4242")
         self.assertEqual(server.service_vars["TELEGRAM_BOT_TOKEN"], MockTelegram.BOT)
-        self.assertNotIn(MockTelegram.BOT, err)  # токен бота не печатается
+        self.assertNotIn(MockTelegram.BOT, err)  # the bot token isn't printed
         self.assertEqual(self.cli(None, "notify")[1].strip(), "telegram")
 
         code, _, err = self.cli(server, "notify", "off")
@@ -1872,8 +1872,8 @@ class PlatformCommandsTest(unittest.TestCase):
         code, _, err = self.cli(None, "notify", "telegram", "--wait", "0",
                                 env={"TELEGRAM_BOT_TOKEN": MockTelegram.BOT, "TELEGRAM_API_URL": telegram.url})
         self.assertEqual(code, 1)
-        self.assertIn("@small_test_bot", err)  # никто не написал боту
-        with mock.patch.object(sys, "stdin") as stdin:  # нет токена и нет терминала (иначе getpass ждал бы ввода)
+        self.assertIn("@small_test_bot", err)  # nobody wrote to the bot
+        with mock.patch.object(sys, "stdin") as stdin:  # no token and no terminal (else getpass would wait for input)
             stdin.isatty.return_value = False
             code, _, err = run(["notify", "-C", self.app, "telegram"], {})
         self.assertEqual(code, 1)
@@ -1895,8 +1895,8 @@ class DashboardUsageTest(unittest.TestCase):
         self.assertAlmostEqual(estimate_cost({"DISK_USAGE_GB": 2.0, "UNKNOWN": 99}), 0.3)
 
     def test_api_has_sleep_and_cost(self):
-        # CPU: приложение создано 23 ч назад, всё время 0.1 ядра → среднее 0.1 (не занижаем новые приложения).
-        # Память: первый замер 9 ч назад, потом 5 замеров по 0.2 ГБ, в остальные часы спало → среднее 0.1.
+        # CPU: the app was created 23 h ago, 0.1 cores all along → average 0.1 (we don't understate new apps).
+        # Memory: first sample 9 h ago, then 5 samples of 0.2 GB, asleep in the other hours → average 0.1.
         railway = MockRailway(live={"svc-1": "SLEEPING"}, metrics={"proj-1": [
             ("CPU_USAGE", [(h, 0.1) for h in range(24)]),
             ("MEMORY_USAGE_GB", [(9, 0.2), (8, 0.2), (3, 0.2), (2, 0.2), (0, 0.2)])]})
@@ -1908,7 +1908,7 @@ class DashboardUsageTest(unittest.TestCase):
             add_usage(apps, TOKEN)
         shop = next(a for a in apps if a["name"] == "shop")
         self.assertEqual((shop["sleep"], shop["deployment"]["status"]), (True, "SLEEPING"))
-        self.assertAlmostEqual(shop["costUsd"], 3.0)  # 0.1 ядра × $20 + 0.1 ГБ × $10
+        self.assertAlmostEqual(shop["costUsd"], 3.0)  # 0.1 cores × $20 + 0.1 GB × $10
         draft = next(a for a in apps if a["name"] == "draft")
         self.assertEqual((draft["sleep"], draft["costUsd"]), (None, None))
         start = datetime.fromisoformat(railway.variables["metrics"]["start"].replace("Z", "+00:00"))
@@ -1924,14 +1924,14 @@ class DashboardUsageTest(unittest.TestCase):
 
 class LauncherTest(unittest.TestCase):
     def test_small_cmd_is_ascii_with_crlf(self):
-        # cmd.exe разбирает UTF-8 и LF-переводы строк в .cmd с ошибками: обрывки строк исполняются как команды.
+        # cmd.exe misparses UTF-8 and LF line breaks in .cmd files: line fragments get executed as commands.
         data = (Path(__file__).resolve().parents[1] / "small.cmd").read_bytes()
         self.assertTrue(all(b < 128 for b in data), "small.cmd должен быть только ASCII")
         self.assertEqual(data.count(b"\n"), data.count(b"\r\n"), "small.cmd должен быть с переводами строк CRLF")
 
 
 class PipeEncodingTest(unittest.TestCase):
-    """Вывод в канал (| Select-String, > файл) — в кодировке, которой его прочитают, а не в ANSI."""
+    """Output to a pipe (| Select-String, > file) is in the encoding it will be read with, not in ANSI."""
 
     def stream(self, tty=False):
         stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1251")
@@ -1973,7 +1973,7 @@ class PipeEncodingTest(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "win32", "кодировка консоли есть только на Windows")
     def test_small_cmd_pipe_uses_requested_encoding(self):
-        # small.cmd запускает python -I: без нашей обработки PYTHONIOENCODING игнорировался, и в канал шёл cp1251.
+        # small.cmd runs python -I: without our handling PYTHONIOENCODING was ignored and cp1251 went into the pipe.
         launcher = str(Path(__file__).resolve().parents[1] / "small.cmd")
         for encoding in ("utf-8", "cp866"):
             proc = subprocess.run(["cmd", "/c", launcher, "--help"], capture_output=True,
@@ -2005,13 +2005,13 @@ CYRILLIC = re.compile("[Ѐ-ӿ]")
 
 
 class LanguageTest(unittest.TestCase):
-    """small говорит по-английски и по-русски: язык — по системе, SMALL_LANG сильнее."""
+    """small speaks English and Russian: the language follows the system, SMALL_LANG takes precedence."""
 
     def test_detect(self):
         cases = [
             ({"SMALL_LANG": "en", "LANG": "ru_RU.UTF-8"}, "linux", "en"),
             ({"SMALL_LANG": "RU"}, "linux", "ru"),
-            ({"SMALL_LANG": "de", "LANG": "ru_RU.UTF-8"}, "linux", "ru"),  # неизвестный SMALL_LANG не мешает локали
+            ({"SMALL_LANG": "de", "LANG": "ru_RU.UTF-8"}, "linux", "ru"),  # unknown SMALL_LANG: the locale is used
             ({"LANG": "ru_RU.UTF-8"}, "darwin", "ru"),
             ({"LANG": "en_US.UTF-8"}, "linux", "en"),
             ({"LC_ALL": "en_GB.UTF-8", "LANG": "ru_RU.UTF-8"}, "linux", "en"),
@@ -2030,24 +2030,26 @@ class LanguageTest(unittest.TestCase):
                 self.assertEqual(i18n.detect({"SMALL_LANG": "en"}, "win32"), "en")
 
     def test_every_russian_string_has_an_english_twin(self):
-        """Кириллица в коде CLI — только вторым аргументом tr(en, ru), в комментариях и docstring'ах."""
-        allowed = {"д", "да"}  # ответы, которые принимает confirm()
+        """Cyrillic in the CLI code only as the second argument of tr(en, ru), in comments and docstrings."""
+        allowed = {"д", "да"}  # answers that confirm() accepts
         package = Path(__file__).resolve().parents[1] / "small_cli"
         problems = []
         for path in sorted(package.rglob("*.py")):
             if "templates" in path.parts:
-                continue  # приложения: язык посетителя и OWNER_LANG, проверяются своими тестами
+                continue  # apps: the visitor's language and OWNER_LANG, checked by their own tests
             tree = ast.parse(path.read_text(encoding="utf-8"))
             russian, docstrings = set(), set()
             for node in ast.walk(tree):
                 if isinstance(node, ast.Tuple) and len(node.elts) == 2 and all(
-                        isinstance(n, ast.Constant) and isinstance(n.value, str) for n in node.elts)                         and not CYRILLIC.search(node.elts[0].value):
-                    russian.add(id(node.elts[1]))  # пара ("English", "Русский") для tr(*pair)
-                if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "tr"                         and not any(isinstance(a, ast.Starred) for a in node.args):
+                        isinstance(n, ast.Constant) and isinstance(n.value, str) for n in node.elts) \
+                        and not CYRILLIC.search(node.elts[0].value):
+                    russian.add(id(node.elts[1]))  # an ("English", "Russian") pair for tr(*pair)
+                if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "tr" \
+                        and not any(isinstance(a, ast.Starred) for a in node.args):
                     self.assertEqual(len(node.args), 2, "%s:%d" % (path.name, node.lineno))
                     english = [n.value for n in ast.walk(node.args[0])
                                if isinstance(n, ast.Constant) and isinstance(n.value, str) and CYRILLIC.search(n.value)]
-                    self.assertEqual(english, [], "%s:%d: кириллица в английском тексте" % (path.name, node.lineno))
+                    self.assertEqual(english, [], "%s:%d: Cyrillic in the English text" % (path.name, node.lineno))
                     russian.update(id(n) for n in ast.walk(node.args[1]))
                 body = getattr(node, "body", None)
                 if isinstance(body, list) and body and isinstance(body[0], ast.Expr) \
@@ -2057,11 +2059,11 @@ class LanguageTest(unittest.TestCase):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str) and CYRILLIC.search(node.value) \
                         and id(node) not in russian and id(node) not in docstrings and node.value not in allowed:
                     problems.append("%s:%d %r" % (path.relative_to(package), node.lineno, node.value[:60]))
-        self.assertEqual(problems, [], "русский текст без английского варианта")
+        self.assertEqual(problems, [], "Russian text without an English twin")
 
 
 class EnglishOutputTest(unittest.TestCase):
-    """По-английски small не выдаёт ни слова по-русски."""
+    """In English, small doesn't print a single Russian word."""
 
     def setUp(self):
         i18n.use("en")
@@ -2105,10 +2107,10 @@ class EnglishOutputTest(unittest.TestCase):
             code, out, err = run(argv, env)
             self.assertEqual(code, 0, (argv, err))
             self.assertEnglish(out + err)
-        self.assertEqual(server.service_vars.get("OWNER_LANG"), "en")  # лог и Telegram владельцу — по-английски
+        self.assertEqual(server.service_vars.get("OWNER_LANG"), "en")  # owner's log and Telegram messages in English
 
     def test_errors(self):
-        for argv, env in ((["deploy", self.tmp.name], {}),  # нет токена
+        for argv, env in ((["deploy", self.tmp.name], {}),  # no token
                           (["deploy", os.path.join(self.tmp.name, "missing")], {"RAILWAY_API_TOKEN": TOKEN}),
                           (["logs", self.tmp.name], {"RAILWAY_API_TOKEN": TOKEN})):
             code, out, err = run(argv, env)
@@ -2123,7 +2125,7 @@ class EnglishOutputTest(unittest.TestCase):
 
 
 def setUpModule():
-    # Проверки выше читают русский текст; английский — в EnglishOutputTest. Язык машины и CI не важен.
+    # The checks above read Russian text; English is in EnglishOutputTest. The machine's and CI's language don't matter.
     i18n.use("ru")
 
 

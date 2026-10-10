@@ -1,4 +1,4 @@
-"""small domain: свой домен вместо *.up.railway.app — Railway выдаёт DNS-записи, их нужно прописать у регистратора."""
+"""small domain: a custom domain instead of *.up.railway.app; Railway issues DNS records to add at the registrar."""
 
 import argparse
 import re

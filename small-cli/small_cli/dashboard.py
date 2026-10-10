@@ -1,12 +1,12 @@
-"""`small dashboard`: локальная страница со списком микро-приложений в папке.
+"""`small dashboard`: a local page listing the micro-apps in a folder.
 
-Приложением считается папка, где есть small.json и/или .small.json. Привязку и ссылки берём из локальных
-файлов. Если задан RAILWAY_API_TOKEN, для привязанных приложений дополнительно спрашиваем у Railway статус
-последнего деплоя; любая ошибка (сеть, таймаут, токен) просто оставляет локальные данные.
-Значения переменных из small.json и сам токен Railway никогда не отдаются в браузер.
+An app is a folder that has small.json and/or .small.json. The link to Railway and the URLs come from the local
+files. If RAILWAY_API_TOKEN is set, for linked apps we also ask Railway for the status of the latest deploy;
+any error (network, timeout, token) just leaves the local data.
+Variable values from small.json and the Railway token itself are never sent to the browser.
 
-Кнопка «Поделиться» (/api/access) — единственное, что меняет данные: выдаёт и отзывает доступ той же логикой,
-что small access. Такие запросы принимаются только со страницы этого дашборда (см. DashboardHandler._trusted).
+The Share button (/api/access) is the only thing that changes data: it grants and revokes access with the same
+logic as small access. Such requests are accepted only from this dashboard's page (see DashboardHandler._trusted).
 """
 
 import hmac
@@ -30,27 +30,27 @@ from .i18n import lang, tr
 from .railway import Railway, RailwayError
 
 DEFAULT_PORT = 3000
-MAX_DEPTH = 6  # глубже не ищем: `small dashboard` из корня диска не должен обходить весь диск
+MAX_DEPTH = 6  # no deeper: `small dashboard` from the root of a drive must not walk the whole drive
 DOMAIN_RE = re.compile(r"[A-Za-z0-9.-]+\Z")
 RAILWAY_ID_RE = re.compile(r"[A-Za-z0-9-]+\Z")
 DEPLOY_STATUS_RE = re.compile(r"[A-Z_]{1,32}\Z")
-LIVE_TIMEOUT = 5      # секунд на запрос к Railway: кнопка «Обновить» не должна зависать
+LIVE_TIMEOUT = 5      # seconds per request to Railway: the Refresh button must not hang
 LIVE_WORKERS = 8
 LOG_LINES = 200
 LOAD_DAYS = 7
-SECRET_HEADER = "X-Small-Dashboard"  # ключ этого запуска сервера в запросах страницы к /api/access
-MAX_BODY = 4096       # байт в теле POST /api/access: там всего три коротких поля
-MAX_WHO = 320         # символов в адресе почты, домене или имени
-# Тарифы Railway за месяц (docs.railway.com/reference/pricing/plans) на единицу средней нагрузки из metrics.
+SECRET_HEADER = "X-Small-Dashboard"  # this server run's key in the page's requests to /api/access
+MAX_BODY = 4096       # bytes in the POST /api/access body: it has only three short fields
+MAX_WHO = 320         # characters in an email address, domain or name
+# Railway monthly prices (docs.railway.com/reference/pricing/plans) per unit of average load from metrics.
 MONTHLY_PRICES_USD = {
-    "CPU_USAGE": 20.0,         # $20 за vCPU, загруженный весь месяц
-    "MEMORY_USAGE_GB": 10.0,   # $10 за ГБ памяти весь месяц
-    "DISK_USAGE_GB": 0.15,     # $0.15 за ГБ тома весь месяц
+    "CPU_USAGE": 20.0,         # $20 per vCPU busy all month
+    "MEMORY_USAGE_GB": 10.0,   # $10 per GB of memory all month
+    "DISK_USAGE_GB": 0.15,     # $0.15 per GB of volume all month
 }
 
 
 def scan_apps(root, max_depth=MAX_DEPTH):
-    """Находит приложения под root. Внутрь найденного приложения не спускается."""
+    """Finds apps under root. Does not descend into an app once found."""
     root = Path(root).resolve()
     apps = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -82,7 +82,7 @@ def describe_app(folder, root):
         app["errors"].append(str(e).replace(str(folder / STATE_FILE), STATE_FILE))
 
     app["name"] = config["name"] or (state.get("name") if isinstance(state.get("name"), str) else None) or folder.name
-    app["envNames"] = sorted(config["env"])  # только имена: значения — секреты
+    app["envNames"] = sorted(config["env"])  # names only: the values are secrets
 
     if state.get("serviceId"):
         app["status"] = "linked"
@@ -107,10 +107,10 @@ def _is_id(value):
 
 
 def add_live_status(apps, token, timeout=LIVE_TIMEOUT):
-    """Дописывает app["deployment"] = {"status", "createdAt"} из Railway для привязанных приложений.
+    """Adds app["deployment"] = {"status", "createdAt"} from Railway for linked apps.
 
-    Возвращает режим для страницы: "off" (нет токена), "on" (Railway ответил) или "error" (не ответил ни разу).
-    Никогда не бросает исключений: живой статус — украшение, локальные данные важнее.
+    Returns the mode for the page: "off" (no token), "on" (Railway answered) or "error" (it never answered).
+    Never raises: the live status is a nicety, the local data matters more.
     """
     linked = [app for app in apps if app["serviceId"] and app["environmentId"]]
     if not token:
@@ -122,7 +122,7 @@ def add_live_status(apps, token, timeout=LIVE_TIMEOUT):
     def fetch(app):
         try:
             return app, api.instance_status(app["serviceId"], app["environmentId"], timeout=timeout), True
-        except Exception:  # сеть, таймаут, неверный токен, удалённый сервис, неожиданный ответ
+        except Exception:  # network, timeout, bad token, deleted service, unexpected response
             return app, None, False
 
     answered = False
@@ -142,14 +142,14 @@ def add_live_status(apps, token, timeout=LIVE_TIMEOUT):
 
 
 def estimate_cost(load):
-    """$ в месяц при средней нагрузке load (ядра, ГБ), по тарифам Railway; без исходящего трафика
-    и бесплатного лимита тарифа ($5 Hobby / $20 Pro)."""
+    """$ per month at average load `load` (cores, GB), at Railway prices; excluding egress
+    and the plan's free allowance ($5 Hobby / $20 Pro)."""
     return sum(MONTHLY_PRICES_USD[m] * float(v) for m, v in load.items() if m in MONTHLY_PRICES_USD)
 
 
 def add_usage(apps, token, timeout=LIVE_TIMEOUT, days=LOAD_DAYS):
-    """Дописывает app["costUsd"] — оценку $/мес для проекта приложения (с его базами) по средней нагрузке
-    за последние days дней. Ошибки молча оставляют None: это оценка, а не биллинг."""
+    """Adds app["costUsd"]: an estimate in $/month for the app's project (with its databases) from the average load
+    over the last `days` days. Errors silently leave None: this is an estimate, not billing."""
     projects = sorted({app["projectId"] for app in apps if app["projectId"]})
     if not token or not projects:
         return
@@ -174,22 +174,22 @@ def add_usage(apps, token, timeout=LIVE_TIMEOUT, days=LOAD_DAYS):
 
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
-    # В Windows SO_REUSEADDR разрешает занять порт, который уже слушает другой процесс.
+    # On Windows, SO_REUSEADDR allows taking a port that another process is already listening on.
     allow_reuse_address = sys.platform != "win32"
 
     def __init__(self, address, root, token=None):
         super().__init__(address, DashboardHandler)
         self.root = Path(root).resolve()
-        self.token = token  # токен Railway для живых статусов; в браузер не уходит
+        self.token = token  # Railway token for live statuses; never sent to the browser
         port = self.server_address[1]
-        # Защита от DNS rebinding: чужой сайт, указавший свой домен на 127.0.0.1, получит 403.
+        # DNS rebinding protection: a foreign site that points its domain at 127.0.0.1 gets a 403.
         self.allowed_hosts = {"127.0.0.1:%d" % port, "localhost:%d" % port}
         self.allowed_origins = {"http://" + host for host in self.allowed_hosts}
-        # Ключ этого запуска: страница шлёт его заголовком SECRET_HEADER в каждом запросе к /api/access. Чужой
-        # сайт его не знает, а запрос со своим заголовком браузер отправит только после CORS-preflight (OPTIONS),
-        # который сервер не одобряет.
+        # This run's key: the page sends it in the SECRET_HEADER header with every request to /api/access. A foreign
+        # site does not know it, and a browser sends a request with a custom header only after a CORS preflight
+        # (OPTIONS), which the server does not approve.
         self.secret = secrets.token_urlsafe(32)
-        self.access_lock = threading.Lock()  # small.json и переменные в Railway меняет один запрос за раз
+        self.access_lock = threading.Lock()  # one request at a time changes small.json and the variables in Railway
 
     @property
     def url(self):
@@ -197,7 +197,7 @@ class DashboardServer(ThreadingHTTPServer):
 
 
 def start_server(root, port=DEFAULT_PORT, token=None):
-    """Сервер на 127.0.0.1:port; если порт занят — на свободном случайном."""
+    """A server on 127.0.0.1:port; if the port is taken, on a random free one."""
     try:
         return DashboardServer(("127.0.0.1", port), root, token)
     except OSError:
@@ -208,7 +208,7 @@ def start_server(root, port=DEFAULT_PORT, token=None):
 
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "small-dashboard"
-    timeout = 30  # секунд тишины от браузера: молчащее соединение не держит поток вечно
+    timeout = 30  # seconds of silence from the browser: an idle connection does not hold a thread forever
 
     def do_GET(self):
         if self.headers.get("Host") not in self.server.allowed_hosts:
@@ -216,7 +216,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         path, params = url.path, {k: v[-1] for k, v in parse_qs(url.query).items()}
         if path == "/":
-            # Страницу с ключом нельзя встроить в чужой сайт: там под видимую кнопку подложили бы «Отозвать».
+            # The page with the key must not be framed by a foreign site: it could put Revoke under a visible button.
             return self._send(200, "text/html; charset=utf-8", render_page(self.server.secret).encode("utf-8"),
                               {"X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'"})
         if path == "/open":
@@ -238,10 +238,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._send(404, "text/plain; charset=utf-8", b"Not found")
 
     def do_POST(self):
-        """POST /api/access {"app": relPath, "action": "add" | "revoke", "who": почта, @домен или имя}."""
+        """POST /api/access {"app": relPath, "action": "add" | "revoke", "who": email, @domain or name}."""
         length = self._content_length()
-        # Тело (не больше MAX_BODY) читаем до проверок: закрытый с непрочитанными данными сокет Windows обрывает
-        # RST-пакетом, и браузер не увидел бы даже ответа 403.
+        # Read the body (at most MAX_BODY) before the checks: Windows aborts a socket closed with unread data
+        # with an RST packet, and the browser would not even see the 403 response.
         body = self.rfile.read(length) if length is not None and length <= MAX_BODY else None
         if not self._trusted():
             return self._forbidden()
@@ -256,7 +256,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._json(413, {"error": tr("request is too large", "слишком большой запрос")})
         try:
             request = json.loads(body.decode("utf-8"))
-        except ValueError:  # и UnicodeDecodeError
+        except ValueError:  # and UnicodeDecodeError
             request = None
         if not isinstance(request, dict) or request.get("action") not in ("add", "revoke") \
                 or not isinstance(request.get("app"), str) or not isinstance(request.get("who"), str):
@@ -266,7 +266,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._access_change(request["app"], request["action"], request["who"].strip())
 
     def _content_length(self):
-        """Длина тела из Content-Length; None — заголовка нет, он неверный или тело идёт кусками (chunked)."""
+        """Body length from Content-Length; None if the header is missing or invalid, or the body is chunked."""
         if self.headers.get("Transfer-Encoding"):
             return None
         try:
@@ -276,8 +276,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return length if length >= 0 else None
 
     def _trusted(self):
-        """Запрос — со страницы этого дашборда: Host наш (DNS rebinding), Origin наш, если браузер его прислал
-        (чужой сайт), браузер не пометил запрос как межсайтовый, и в SECRET_HEADER — ключ этого запуска."""
+        """The request comes from this dashboard's page: Host is ours (DNS rebinding), Origin is ours if the browser
+        sent one (foreign site), the browser did not mark the request as cross-site, and SECRET_HEADER holds this
+        run's key."""
         server = self.server
         if self.headers.get("Host") not in server.allowed_hosts:
             return False
@@ -290,13 +291,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return hmac.compare_digest(given, server.secret.encode("ascii"))
 
     def _forbidden(self):
-        # Свою страницу сервер видит с отказом, только если его перезапустили: ключ у неё прежний.
+        # The server rejects its own page only if it was restarted: the page still has the old key.
         self._json(403, {"error": tr("forbidden: reload the page (the dashboard may have been restarted)",
                                      "запрещено: обновите страницу (дашборд мог быть перезапущен)")})
 
     def _access_app(self, rel_path):
-        """(приложение, None) или (None, (код, ответ)). Только приложение из списка (произвольные пути с диска
-        не принимаются) и привязанное к Railway; нужен токен — иначе small.json и Railway разойдутся."""
+        """(app, None) or (None, (code, response)). Only an app from the list (arbitrary paths on disk are not
+        accepted) that is linked to Railway; a token is required, otherwise small.json and Railway would diverge."""
         app = self._find(rel_path)
         if not app or not app["serviceId"]:
             return None, (404, {"error": _not_deployed()})
@@ -305,8 +306,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return app, None
 
     def _access_list(self, rel_path):
-        """GET /api/access?app=relPath: у кого есть доступ — адреса, домены и имена личных ссылок, без токенов."""
-        from .commands.access import list_access  # не в начале модуля: commands импортирует этот модуль
+        """GET /api/access?app=relPath: who has access (addresses, domains and personal-link names), without tokens."""
+        from .commands.access import list_access  # not at module top: commands imports this module
 
         if not self._trusted():
             return self._forbidden()
@@ -321,7 +322,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         names = []
         for name, _ in info["entries"]:
             if name not in names:
-                names.append(name)  # повторы имени и общие ссылки без имени отзываются вместе — одной строкой
+                names.append(name)  # repeated names and unnamed shared links are revoked together, as one row
         self._json(200, {
             "app": app["relPath"], "url": _app_url(app),
             "emails": [{"who": email, "domain": email.startswith("@")} for email in info["emails"]],
@@ -330,8 +331,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         })
 
     def _access_change(self, rel_path, action, who):
-        """Выдаёт или отзывает доступ, как small access add / revoke: small.json, Railway, перезапуск.
-        Личная ссылка уходит в браузер только здесь — в ответе на add, который её создал."""
+        """Grants or revokes access like small access add / revoke: small.json, Railway, restart.
+        A personal link reaches the browser only here, in the response to the add that created it."""
         from .commands.access import grant_access, revoke_access, who_error
 
         if not _valid_who(who, action):
@@ -348,12 +349,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._json(400, {"error": str(e)})
         except RailwayError as e:
             return self._json(502, {"error": "Railway: %s" % e})
-        except OSError as e:  # small.json не записался: нет прав, файл занят другой программой
+        except OSError as e:  # small.json was not written: no permission, the file is locked by another program
             return self._json(500, {"error": str(e)})
         payload = {"ok": True, "action": action, "kind": result["kind"], "who": result["who"],
                    "url": _app_url(app), "warnings": warnings}
         if action == "add" and result["kind"] == "link":
-            # Домен — проверенный из describe_app, а не как есть из .small.json.
+            # The domain is the one validated by describe_app, not taken as is from .small.json.
             payload["link"] = (access.invite_link(urlparse(app["url"]).netloc, result["token"])
                                if app["url"] else None)
         elif action == "add":
@@ -361,11 +362,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._json(200, payload)
 
     def _find(self, rel_path):
-        """Приложение из списка по relPath — произвольные пути с диска не принимаются."""
+        """The app from the list by relPath; arbitrary paths on disk are not accepted."""
         return next((app for app in scan_apps(self.server.root) if app["relPath"] == rel_path), None)
 
     def _open(self, rel_path):
-        """Редирект на приложение по ссылке-приглашению. Токен уходит только в адресную строку браузера."""
+        """Redirect to the app via the invite link. The token goes only into the browser's address bar."""
         app = self._find(rel_path)
         if not app or not app["url"]:
             return self._send(404, "text/plain; charset=utf-8",
@@ -432,23 +433,23 @@ def _app_url(app):
 
 
 def _valid_who(who, action):
-    """Почта, @домен или имя личной ссылки — по тем же правилам, что у small access; "" — общая ссылка без имени
-    (её можно только отозвать)."""
+    """An email, @domain or personal-link name, by the same rules as small access; "" is the unnamed shared link
+    (it can only be revoked)."""
     if action == "revoke" and who == "":
         return True
     return len(who) <= MAX_WHO and (access.is_email(who.lower()) or bool(access.NAME_RE.match(who)))
 
 
 def _page_texts():
-    """Тексты, которые собирает JS страницы, на текущем языке: уходят в неё объектом T.
+    """Texts that the page's JS assembles, in the current language: they go into the page as the T object.
 
-    {name} — подстановки для fmt() в JS; apps — формы для plural(): три по-русски, две по-английски.
+    {name} are substitutions for fmt() in JS; apps are the forms for plural(): three in Russian, two in English.
     """
     return {
-        "locale": tr("en-US", "ru-RU"),  # для toLocaleString / toLocaleTimeString
+        "locale": tr("en-US", "ru-RU"),  # for toLocaleString / toLocaleTimeString
         "linked": tr("Linked to Railway", "Привязан к Railway"),
         "notDeployed": tr("Not deployed", "Не задеплоен"),
-        "deploy": {  # подсказка к статусу последнего деплоя; ключи — статусы Railway API
+        "deploy": {  # hint for the latest deploy's status; the keys are Railway API statuses
             "SUCCESS": tr("running", "работает"),
             "SLEEPING": tr("sleeping", "спит"),
             "QUEUED": tr("queued", "в очереди"),
@@ -499,7 +500,7 @@ def _page_texts():
         "summaryEmpty": tr("Updated at {time}", "Обновлено в {time}"),
         "listFailed": tr("Couldn't load the app list: {error}. Is small dashboard running?",
                          "Не удалось получить список: {error}. Запущен ли small dashboard?"),
-        # Окно «Поделиться»
+        # Share dialog
         "share": tr("Share", "Поделиться"),
         "shareHint": tr("Give access by work email or with a personal link",
                         "Выдать доступ по рабочей почте или по личной ссылке"),
@@ -548,8 +549,8 @@ def _page_texts():
 
 
 def render_page(secret=""):
-    """HTML дашборда на текущем языке: тексты разметки подставляются в {{name}}, тексты для JS — объектом T.
-    secret — ключ запуска сервера для запросов к /api/access."""
+    """The dashboard HTML in the current language: markup texts go into {{name}}, texts for JS as the T object.
+    secret is the server run's key for requests to /api/access."""
     code = '<code class="font-mono">%s</code>'
     values = {
         "lang": lang(),
@@ -568,25 +569,26 @@ def render_page(secret=""):
                          "bob: a personal link.",
                          "ivan@company.com — вход по этой почте, @company.com — весь домен, bob — личная ссылка."),
         "share_who_has": tr("Who has access", "У кого есть доступ"),
-        # JSON внутри <script>: "</" экранируем, чтобы "</script>" в строке не закрыл тег раньше времени.
+        # JSON inside <script>: escape "</" so that a "</script>" in a string does not close the tag too early.
         "texts": json.dumps(_page_texts(), ensure_ascii=False).replace("</", "<\\/"),
-        "secret": json.dumps(secret),  # token_urlsafe: только латиница, цифры, - и _
+        "secret": json.dumps(secret),  # token_urlsafe: only Latin letters, digits, - and _
     }
     return re.sub(r"\{\{(\w+)\}\}", lambda m: values[m.group(1)], PAGE_TEMPLATE)
 
 
-# Внутри страницы комментариев нет: она уходит в браузер и на английском, поэтому заметки к ней — здесь.
-# - У #logs нет display-класса: Tailwind-класс вроде "flex" перебил бы атрибут hidden, и окно было бы видно сразу.
-# - DEPLOY_STATUS — тон бейджа живого статуса последнего деплоя из Railway; подпись к статусу — в T.deploy.
-# - ARROW вставляется через insertAdjacentHTML: это константа, не данные пользователя.
-# - Клик по #logs или #logs-backdrop — клик по затемнённому фону вокруг окна: окно закрывается.
-# - fmt() подставляет {name} за один проход: подставленные значения (сообщения об ошибках) повторно не разбираются.
-# - SECRET — ключ этого запуска сервера: api() шлёт его заголовком X-Small-Dashboard. После перезапуска small dashboard
-#   ключ другой, сервер отвечает 403 «обновите страницу».
-# - #share, как и #logs, без display-класса. Окно «Поделиться» закрывают только × и Escape, не клик мимо: случайный
-#   клик не должен терять личную ссылку, которая показывается один раз. При закрытии она стирается со страницы.
-# - В списке доступа (/api/access) токенов нет; ссылка приходит только в ответе на add, который её создал.
-# - Ответ, пришедший после закрытия окна или открытия его для другого приложения, не показывается (shareState.app).
+# The page itself has no comments: it goes to the browser and is in English, so its notes live here.
+# - #logs has no display class: a Tailwind class like "flex" would override the hidden attribute and the dialog
+#   would show right away.
+# - DEPLOY_STATUS is the badge tone for the latest deploy's live status from Railway; the status label is in T.deploy.
+# - ARROW is inserted via insertAdjacentHTML: it is a constant, not user data.
+# - A click on #logs or #logs-backdrop is a click on the dimmed background around the dialog: the dialog closes.
+# - fmt() substitutes {name} in a single pass: substituted values (error messages) are not parsed again.
+# - SECRET is this server run's key: api() sends it in the X-Small-Dashboard header. After small dashboard restarts
+#   the key is different, and the server answers 403 "reload the page".
+# - #share, like #logs, has no display class. The Share dialog closes only with × and Escape, not a click outside: a
+#   stray click must not lose the personal link, which is shown only once. On close it is wiped from the page.
+# - The access list (/api/access) has no tokens; a link arrives only in the response to the add that created it.
+# - A response that arrives after the dialog was closed or reopened for another app is not shown (shareState.app).
 PAGE_TEMPLATE = r"""<!doctype html>
 <html lang="{{lang}}">
 <head>

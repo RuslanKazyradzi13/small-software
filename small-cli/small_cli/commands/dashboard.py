@@ -1,4 +1,4 @@
-"""small dashboard: локальная страница со списком приложений (сервер — в small_cli/dashboard.py)."""
+"""small dashboard: a local page listing the apps (the server is in small_cli/dashboard.py)."""
 
 import webbrowser
 

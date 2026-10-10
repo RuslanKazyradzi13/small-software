@@ -1,4 +1,4 @@
 * text=auto
-# cmd.exe неверно разбирает .cmd/.bat с переводами строк LF — всегда CRLF, при любых настройках git.
+# cmd.exe misreads .cmd/.bat files with LF line endings, so keep CRLF whatever the git settings.
 *.cmd text eol=crlf
 *.bat text eol=crlf
