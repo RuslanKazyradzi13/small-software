@@ -8,6 +8,8 @@ small init my-app        # сервер с защитой по ссылке, sma
 cd my-app
 small deploy             # → https://my-app-3f9a.up.railway.app
 small open               # открыть по ссылке-приглашению
+small access add bob     # личная ссылка для bob; small access revoke bob — отозвать
+small env set DEBUG=1    # переменные окружения
 small logs -f            # логи
 small dashboard          # все приложения в браузере
 small destroy            # удалить из Railway
@@ -15,8 +17,8 @@ small destroy            # удалить из Railway
 
 | Папка | Что внутри |
 |---|---|
-| [small-cli](small-cli/README.md) | утилита `small` (Python 3.8+, без зависимостей): `init`, `deploy`, `link`/`open`, `logs`, `destroy`, `dashboard` |
-| [magic-link](magic-link/README.md) | доступ по ссылке-приглашению: middleware для Python (WSGI) и Node.js; его же используют шаблоны `small init` |
+| [small-cli](small-cli/README.md) | утилита `small` (Python 3.8+, без зависимостей): `init` (шаблоны python-http, node-http, fastapi, streamlit), `deploy`, `link`/`open`, `access`, `env`, `logs`, `destroy`, `dashboard` |
+| [magic-link](magic-link/README.md) | доступ по ссылке-приглашению с личными токенами: middleware для Python (WSGI и ASGI) и Node.js; его же используют шаблоны `small init` |
 | [manual-test-app](manual-test-app) | приложение, созданное `small init`, — пример того, что получается из шаблона `python-http` |
 
 ## Установка
@@ -34,7 +36,7 @@ pip install ./small-cli
 ## Разработка
 
 ```bash
-cd small-cli && python -m unittest discover -s tests        # 74 теста; тесты Streamlit — если он установлен
+cd small-cli && python -m unittest discover -s tests        # 91 тест; тесты Streamlit/FastAPI — если они установлены
 cd magic-link && python -m unittest test_magic_link && node --test
 ```
 

@@ -14,6 +14,10 @@ TEMPLATES = {
         "description": "Node.js 18+, модуль http + magic-link.js",
         "gitignore": ["node_modules/", "npm-debug.log*"],
     },
+    "fastapi": {
+        "description": "FastAPI + uvicorn (ASGI), защита MagicLinkASGI из magic_link.py",
+        "gitignore": ["__pycache__/", "*.pyc", ".venv/", "venv/"],
+    },
     "streamlit": {
         "description": "Streamlit: интерактивный интерфейс на Python, вход по ссылке встроен в app.py",
         "gitignore": ["__pycache__/", "*.pyc", ".venv/", "venv/", ".streamlit/secrets.toml"],

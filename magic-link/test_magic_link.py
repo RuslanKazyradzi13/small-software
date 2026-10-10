@@ -1,12 +1,13 @@
-"""Тесты magic_link.py. Запуск: python -m unittest test_magic_link"""
+"""Тесты magic_link.py (WSGI и ASGI). Запуск: python -m unittest test_magic_link"""
 
+import asyncio
 import contextlib
 import io
 import unittest
 from unittest import mock
 from wsgiref.util import setup_testing_defaults
 
-from magic_link import COOKIE_NAME, MagicLink, _cookie_value
+from magic_link import COOKIE_NAME, MagicLink, MagicLinkASGI, _cookie_value, parse_tokens
 
 TOKEN = "s3cret-token"
 
@@ -114,6 +115,129 @@ class MagicLinkTest(unittest.TestCase):
         self.assertNotIn("<form", body)
         # Встроенный эндпоинт выключен: POST уходит в обычную проверку доступа.
         self.assertEqual(call(app, path="/_access/request", method="POST")[0], "403 Forbidden")
+
+
+class NamedTokensTest(unittest.TestCase):
+    """Токен на каждого человека: отзыв одного не задевает остальных."""
+
+    def test_parse_tokens(self):
+        self.assertEqual(parse_tokens(" alice:tok-a, tok-b ,, bob : tok-c "),
+                         [("alice", "tok-a"), ("", "tok-b"), ("bob", "tok-c")])
+        self.assertEqual(parse_tokens(["x:1", ":2", "y:"]), [("x", "1"), ("", "2")])
+        self.assertEqual(parse_tokens(""), [])
+
+    def test_personal_links_and_revocation(self):
+        app = MagicLink(secret_app, tokens="alice:tok-a,bob:tok-b", request_url="")
+        status, headers, _, log = call(app, query="token=tok-b")
+        self.assertEqual(status, "302 Found")
+        self.assertIn("вход по ссылке (bob)", log)
+        self.assertNotIn("tok-b", log)
+        bob_cookie = headers["Set-Cookie"].split(";")[0]
+        alice_cookie = "%s=%s" % (COOKIE_NAME, _cookie_value("tok-a"))
+        self.assertEqual(call(app, cookie=bob_cookie)[0], "200 OK")
+
+        revoked = MagicLink(secret_app, tokens="alice:tok-a", request_url="")  # bob убран из ACCESS_TOKEN
+        self.assertEqual(call(revoked, cookie=bob_cookie)[0], "403 Forbidden")
+        self.assertEqual(call(revoked, query="token=tok-b")[0], "403 Forbidden")
+        self.assertEqual(call(revoked, cookie=alice_cookie)[0], "200 OK")
+
+
+async def secret_asgi(scope, receive, send):
+    if scope["type"] == "lifespan":
+        scope["seen"] = True
+        return
+    if scope["type"] == "websocket":
+        return await send({"type": "websocket.accept"})
+    await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/plain")]})
+    await send({"type": "http.response.body", "body": b"secret page"})
+
+
+def asgi_call(app, path="/", query="", cookie=None, method="GET", body=b"", kind="http", headers=None):
+    raw_headers = [(b"host", b"app.test")] + ([(b"cookie", cookie.encode())] if cookie else [])
+    raw_headers += [(k.encode(), v.encode()) for k, v in (headers or {}).items()]
+    scope = {"type": kind, "method": method, "path": path, "root_path": "", "query_string": query.encode(),
+             "headers": raw_headers, "scheme": "http", "client": ("127.0.0.1", 50000)}
+    inbox = [{"type": "http.request", "body": body, "more_body": False}]
+    sent = []
+
+    async def receive():
+        return inbox.pop(0) if inbox else {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        asyncio.run(app(scope, receive, send))
+    start = next((m for m in sent if m["type"] == "http.response.start"), {})
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body").decode("utf-8")
+    return start.get("status"), {k.decode(): v.decode() for k, v in start.get("headers", [])}, body, sent, out.getvalue()
+
+
+class MagicLinkASGITest(unittest.TestCase):
+    def setUp(self):
+        self.app = MagicLinkASGI(secret_asgi, tokens=TOKEN, request_url="")
+        self.cookie = "%s=%s" % (COOKIE_NAME, _cookie_value(TOKEN))
+
+    def test_no_token_shows_403_with_request_button(self):
+        status, headers, body, _, _ = asgi_call(self.app)
+        self.assertEqual(status, 403)
+        self.assertEqual(headers["content-type"], "text/html; charset=utf-8")
+        self.assertIn("Запросить доступ", body)
+        self.assertNotIn("secret page", body)
+
+    def test_valid_token_sets_cookie_and_redirects(self):
+        status, headers, _, _, log = asgi_call(self.app, path="/отчёт", query="token=%s&page=2" % TOKEN,
+                                               headers={"x-forwarded-proto": "https"})
+        self.assertEqual(status, 302)
+        self.assertEqual(headers["location"], "/%D0%BE%D1%82%D1%87%D1%91%D1%82?page=2")
+        self.assertTrue(headers["set-cookie"].startswith(self.cookie + ";"))
+        for flag in ("HttpOnly", "SameSite=Lax", "Secure"):
+            self.assertIn(flag, headers["set-cookie"])
+        self.assertIn("вход по ссылке, ip=127.0.0.1", log)
+
+    def test_cookie_passes_and_bad_credentials_do_not(self):
+        self.assertEqual(asgi_call(self.app, cookie=self.cookie)[:3][2], "secret page")
+        status, _, body, _, _ = asgi_call(self.app, query="token=wrong")
+        self.assertEqual((status, "Ссылка недействительна" in body), (403, True))
+        self.assertEqual(asgi_call(self.app, cookie="%s=deadbeef" % COOKIE_NAME)[0], 403)
+
+    def test_no_open_redirect(self):
+        _, headers, _, _, _ = asgi_call(self.app, path="//evil.example/x", query="token=" + TOKEN)
+        self.assertEqual(headers["location"], "/evil.example/x")
+
+    def test_websocket_requires_cookie(self):
+        *_, sent, _ = asgi_call(self.app, kind="websocket")
+        self.assertEqual(sent, [{"type": "websocket.close", "code": 1008}])
+        *_, sent, _ = asgi_call(self.app, kind="websocket", cookie=self.cookie)
+        self.assertEqual(sent, [{"type": "websocket.accept"}])
+
+    def test_lifespan_passes_through(self):
+        scope = {"type": "lifespan"}
+
+        async def noop(*_):
+            return {}
+
+        asyncio.run(self.app(scope, noop, noop))
+        self.assertTrue(scope.get("seen"))
+
+    def test_access_request_is_logged(self):
+        status, _, body, _, log = asgi_call(self.app, path="/_access/request", method="POST",
+                                            body="contact=%40ivan%0Afake".encode(),
+                                            headers={"x-forwarded-for": "203.0.113.7, 10.0.0.1"})
+        self.assertEqual(status, 200)
+        self.assertIn("Запрос отправлен", body)
+        self.assertEqual(log.count("\n"), 1)  # перевод строки из формы экранирован — одна строка лога
+        self.assertIn("contact='@ivan\\nfake' ip=203.0.113.7", log)
+
+    def test_named_tokens_and_revocation(self):
+        app = MagicLinkASGI(secret_asgi, tokens="alice:tok-a,bob:tok-b", request_url="")
+        status, headers, _, _, log = asgi_call(app, query="token=tok-b")
+        self.assertEqual(status, 302)
+        self.assertIn("(bob)", log)
+        bob_cookie = headers["set-cookie"].split(";")[0]
+        revoked = MagicLinkASGI(secret_asgi, tokens="alice:tok-a", request_url="")
+        self.assertEqual(asgi_call(revoked, cookie=bob_cookie)[0], 403)
 
 
 if __name__ == "__main__":

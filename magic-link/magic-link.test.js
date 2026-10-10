@@ -118,6 +118,32 @@ test('запрос доступа пишется в лог одной строк
   assert.equal(entry.ip, '203.0.113.7');
 });
 
+test('разбор токенов с именами', () => {
+  assert.deepEqual(magicLink.parseTokens(' alice:tok-a, tok-b ,, bob : tok-c '),
+    [{ name: 'alice', token: 'tok-a' }, { name: '', token: 'tok-b' }, { name: 'bob', token: 'tok-c' }]);
+  assert.deepEqual(magicLink.parseTokens(''), []);
+});
+
+test('токен на каждого: отзыв одного не задевает остальных', async (t) => {
+  const log = mock.method(console, 'log', () => {});
+  t.after(() => log.mock.restore());
+  const full = await serve({ tokens: 'alice:tok-a,bob:tok-b' });
+  t.after(() => full.close());
+  const res = await fetch(`http://127.0.0.1:${full.address().port}/?token=tok-b`, { redirect: 'manual' });
+  assert.equal(res.status, 302);
+  assert.ok(log.mock.calls.some((c) => /вход по ссылке \(bob\)/.test(c.arguments[0])));
+  assert.ok(!log.mock.calls.some((c) => String(c.arguments[0]).includes('tok-b')));
+  const bobCookie = res.headers.get('set-cookie').split(';')[0];
+  const aliceCookie = 'small_access=' + crypto.createHmac('sha256', 'tok-a').update('magic-link-cookie').digest('hex');
+
+  const revoked = await serve({ tokens: 'alice:tok-a' }); // bob убран из ACCESS_TOKEN
+  t.after(() => revoked.close());
+  const url = `http://127.0.0.1:${revoked.address().port}/`;
+  assert.equal((await fetch(url, { headers: { cookie: bobCookie } })).status, 403);
+  assert.equal((await fetch(url + '?token=tok-b', { redirect: 'manual' })).status, 403);
+  assert.equal((await fetch(url, { headers: { cookie: aliceCookie } })).status, 200);
+});
+
 test('ACCESS_REQUEST_URL заменяет форму ссылкой', async (t) => {
   const s = await serve({ tokens: TOKEN, requestUrl: 'mailto:owner@example.com?subject=Доступ"' });
   t.after(() => s.close());

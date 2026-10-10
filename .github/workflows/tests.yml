@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+env:
+  PYTHONIOENCODING: utf-8  # иначе на Windows русский текст в логах превращается в ??
+
 jobs:
   small-cli:
     name: small-cli · ${{ matrix.os }} · Python ${{ matrix.python }}
@@ -26,22 +29,22 @@ jobs:
       - uses: actions/setup-node@v4  # для теста шаблона node-http
         with:
           node-version: "20"
-      - name: Тесты (без Streamlit — его тесты пропускаются)
+      - name: Тесты (без Streamlit и FastAPI — их тесты пропускаются)
         working-directory: small-cli
         run: python -m unittest discover -s tests -v
 
-  streamlit-template:
-    name: small-cli · шаблон streamlit на настоящем Streamlit
+  framework-templates:
+    name: small-cli · шаблоны streamlit и fastapi на настоящих фреймворках
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install "streamlit>=1.40,<2"
-      - name: Тесты шаблона streamlit
+      - run: pip install "streamlit>=1.40,<2" "fastapi>=0.110,<1" "uvicorn>=0.29,<1" httpx
+      - name: Тесты шаблонов streamlit и fastapi
         working-directory: small-cli
-        run: python -m unittest discover -s tests -k StreamlitTemplateTest -v
+        run: python -m unittest discover -s tests -k StreamlitTemplateTest -k FastAPITemplateTest -v
 
   magic-link:
     name: magic-link · Python + Node.js

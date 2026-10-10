@@ -8,11 +8,13 @@
  *   const guard = magicLink();                                          // чистый http
  *   http.createServer((req, res) => guard(req, res, () => handler(req, res)));
  *
- * Владелец раздаёт ссылку https://<app>/?token=<ACCESS_TOKEN>. По ней middleware ставит куку и перенаправляет
+ * Владелец раздаёт ссылку https://<app>/?token=<токен>. По ней middleware ставит куку и перенаправляет
  * на тот же адрес без токена. Без верного токена или куки — страница 403 с кнопкой «Запросить доступ».
  *
  * Переменные окружения:
- *   ACCESS_TOKEN        токен доступа (можно несколько через запятую); не задан — доступ закрыт для всех
+ *   ACCESS_TOKEN        токены через запятую; у токена может быть имя: "alice:токен1,bob:токен2".
+ *                       Убрали чей-то токен — его ссылка и выданные по ней куки перестают работать,
+ *                       у остальных всё работает. Не задан — доступ закрыт для всех.
  *   ACCESS_REQUEST_URL  куда ведёт кнопка (mailto:..., https://t.me/...). Не задан — кнопка отправляет
  *                       форму в само приложение, и запрос печатается в лог строкой [access-request]
  */
@@ -30,13 +32,13 @@ const MESSAGES = {
 };
 
 function magicLink(options = {}) {
-  const raw = options.tokens ?? process.env.ACCESS_TOKEN ?? '';
-  const tokens = (Array.isArray(raw) ? raw : raw.split(',')).map((t) => t.trim()).filter(Boolean);
-  const cookies = tokens.map(cookieValue);
+  const entries = parseTokens(options.tokens ?? process.env.ACCESS_TOKEN ?? '');
+  const tokens = entries.map((e) => [e.name, e.token]);
+  const cookies = entries.map((e) => [e.name, cookieValue(e.token)]);
   const requestUrl = options.requestUrl ?? process.env.ACCESS_REQUEST_URL ?? '';
   const cookieName = options.cookieName ?? COOKIE_NAME;
   const maxAge = options.maxAge ?? COOKIE_MAX_AGE;
-  if (!tokens.length) console.log('[magic-link] ACCESS_TOKEN не задан: доступ закрыт для всех');
+  if (!entries.length) console.log('[magic-link] ACCESS_TOKEN не задан: доступ закрыт для всех');
 
   function page(req, res, status, kind) {
     const [icon, title, text] = MESSAGES[kind];
@@ -80,7 +82,10 @@ function magicLink(options = {}) {
 
     const token = url.searchParams.get('token');
     if (token !== null) {
-      if (!matches(token, tokens)) return page(req, res, 403, 'invalid');
+      const name = owner(token, tokens);
+      if (name === null) return page(req, res, 403, 'invalid');
+      const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+      console.log('[magic-link] вход по ссылке' + (name ? ` (${name})` : '') + ', ip=' + ip);
       // Убираем токен из адреса, чтобы он не оставался в истории браузера и не утекал через Referer.
       // Ведущие слэши схлопываем: Location "//host" был бы открытым редиректом.
       const full = new URL(req.originalUrl || req.url, 'http://localhost');
@@ -95,20 +100,36 @@ function magicLink(options = {}) {
       return res.end();
     }
 
-    if (matches(readCookie(req.headers.cookie, cookieName), cookies)) return next();
+    if (owner(readCookie(req.headers.cookie, cookieName), cookies) !== null) return next();
     return page(req, res, 403, 'forbidden');
   };
 }
 
-// В куке лежит не сам токен, а производное от него: смена ACCESS_TOKEN отзывает все выданные куки.
+// "alice:tok1, tok2" -> [{name: "alice", token: "tok1"}, {name: "", token: "tok2"}]. В токене не должно быть ":".
+function parseTokens(raw) {
+  const entries = [];
+  for (const item of Array.isArray(raw) ? raw : String(raw).split(',')) {
+    const text = String(item).trim();
+    const colon = text.lastIndexOf(':');
+    const token = text.slice(colon + 1).trim();
+    if (token) entries.push({ name: colon >= 0 ? text.slice(0, colon).trim() : '', token });
+  }
+  return entries;
+}
+
+// В куке лежит не сам токен, а производное от него: убрали токен из ACCESS_TOKEN — его куки больше не подходят.
 function cookieValue(token) {
   return crypto.createHmac('sha256', token).update('magic-link-cookie').digest('hex');
 }
 
-function matches(value, candidates) {
-  if (value == null) return false;
+// Имя владельца секрета ("" — без имени) или null, если секрет не подошёл. pairs: [[имя, секрет], ...].
+function owner(value, pairs) {
+  if (value == null) return null;
   const digest = crypto.createHash('sha256').update(value).digest();
-  return candidates.some((c) => crypto.timingSafeEqual(digest, crypto.createHash('sha256').update(c).digest()));
+  for (const [name, secret] of pairs) {
+    if (crypto.timingSafeEqual(digest, crypto.createHash('sha256').update(secret).digest())) return name;
+  }
+  return null;
 }
 
 function readCookie(header, name) {
@@ -172,3 +193,4 @@ function renderPage(icon, title, text, action) {
 
 module.exports = magicLink;
 module.exports.magicLink = magicLink;
+module.exports.parseTokens = parseTokens;

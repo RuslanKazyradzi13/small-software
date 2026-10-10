@@ -14,11 +14,12 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+from . import access
 from .archive import ALWAYS_IGNORED
 from .config import CONFIG_FILE, STATE_FILE, ConfigError, load_config, load_state
-from .railway import Railway
+from .railway import Railway, RailwayError
 
 DEFAULT_PORT = 3000
 MAX_DEPTH = 6  # глубже не ищем: `small dashboard` из корня диска не должен обходить весь диск
@@ -27,6 +28,7 @@ RAILWAY_ID_RE = re.compile(r"[A-Za-z0-9-]+\Z")
 DEPLOY_STATUS_RE = re.compile(r"[A-Z_]{1,32}\Z")
 LIVE_TIMEOUT = 5      # секунд на запрос к Railway: кнопка «Обновить» не должна зависать
 LIVE_WORKERS = 8
+LOG_LINES = 200
 
 
 def scan_apps(root, max_depth=MAX_DEPTH):
@@ -148,9 +150,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.headers.get("Host") not in self.server.allowed_hosts:
             return self._send(403, "text/plain; charset=utf-8", b"Forbidden")
-        path = urlparse(self.path).path
+        url = urlparse(self.path)
+        path, params = url.path, {k: v[-1] for k, v in parse_qs(url.query).items()}
         if path == "/":
             return self._send(200, "text/html; charset=utf-8", PAGE.encode("utf-8"))
+        if path == "/open":
+            return self._open(params.get("app"))
+        if path == "/api/logs":
+            return self._logs(params.get("app"), params.get("build") == "1")
         if path == "/api/apps":
             apps = scan_apps(self.server.root)
             live = add_live_status(apps, self.server.token)
@@ -160,6 +167,49 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._send(200, "application/json; charset=utf-8",
                               json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         self._send(404, "text/plain; charset=utf-8", b"Not found")
+
+    def _find(self, rel_path):
+        """Приложение из списка по relPath — произвольные пути с диска не принимаются."""
+        return next((app for app in scan_apps(self.server.root) if app["relPath"] == rel_path), None)
+
+    def _open(self, rel_path):
+        """Редирект на приложение по ссылке-приглашению. Токен уходит только в адресную строку браузера."""
+        app = self._find(rel_path)
+        if not app or not app["url"]:
+            return self._send(404, "text/plain; charset=utf-8", "Приложение не найдено или не задеплоено".encode("utf-8"))
+        folder = Path(app["path"])
+        try:
+            entries, _ = access.current(folder, load_state(folder / STATE_FILE))
+        except ConfigError:
+            entries = []
+        self.send_response(302)
+        self.send_header("Location", access.invite_link(urlparse(app["url"]).netloc, access.pick(entries)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _logs(self, rel_path, build):
+        app = self._find(rel_path)
+        if not app or not app["serviceId"]:
+            return self._json(404, {"error": "приложение не найдено или не задеплоено"})
+        if not self.server.token:
+            return self._json(400, {"error": "нужен RAILWAY_API_TOKEN: перезапустите small dashboard с ним"})
+        try:
+            api = Railway(self.server.token)
+            deployment = api.latest_deployment(app["serviceId"], app["environmentId"], timeout=LIVE_TIMEOUT)
+            if not deployment:
+                return self._json(200, {"deployment": None, "lines": []})
+            entries = api.log_entries(deployment["id"], build=build, limit=LOG_LINES)
+        except (RailwayError, KeyError, TypeError) as e:
+            return self._json(502, {"error": "Railway: %s" % e})
+        return self._json(200, {
+            "deployment": {"id": deployment["id"], "status": deployment["status"]},
+            "lines": [{"time": e["timestamp"], "message": e["message"]} for e in entries],
+        })
+
+    def _json(self, code, payload):
+        self._send(code, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
     def _send(self, code, content_type, body):
         self.send_response(code)
@@ -212,6 +262,22 @@ PAGE = r"""<!doctype html>
   </div>
   <div id="error" hidden class="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"></div>
 </main>
+
+<div id="logs" hidden class="fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4">
+  <div class="flex max-h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl bg-white shadow-xl dark:bg-stone-900">
+    <div class="flex flex-wrap items-center gap-2 border-b border-stone-200 px-4 py-3 dark:border-stone-800">
+      <h2 id="logs-title" class="mr-auto min-w-0 truncate font-semibold"></h2>
+      <div class="inline-flex rounded-lg bg-stone-100 p-0.5 text-sm dark:bg-stone-800" role="tablist">
+        <button type="button" data-build="0" class="logs-tab rounded-md px-3 py-1">Приложение</button>
+        <button type="button" data-build="1" class="logs-tab rounded-md px-3 py-1">Сборка</button>
+      </div>
+      <button id="logs-refresh" type="button" class="rounded-lg px-3 py-1 text-sm hover:bg-stone-100 dark:hover:bg-stone-800">Обновить</button>
+      <button id="logs-close" type="button" aria-label="Закрыть" class="rounded-lg px-2 py-1 text-lg leading-none hover:bg-stone-100 dark:hover:bg-stone-800">×</button>
+    </div>
+    <p id="logs-meta" class="px-4 pt-2 text-xs text-stone-500 dark:text-stone-400"></p>
+    <pre id="logs-body" class="m-0 flex-1 overflow-auto whitespace-pre-wrap break-all px-4 py-3 font-mono text-xs leading-relaxed"></pre>
+  </div>
+</div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -293,6 +359,29 @@ function card(app) {
   if (!app.url && !app.railwayUrl) links.append(el("span", "text-stone-500 dark:text-stone-400", "Ещё не деплоилось: small deploy"));
   li.append(links);
 
+  if (app.url || app.serviceId) {
+    const actions = el("div", "mt-3 flex flex-wrap gap-2");
+    if (app.url) {
+      const open = el("a", BUTTON, "Открыть по ссылке");
+      open.href = "/open?app=" + encodeURIComponent(app.relPath);
+      open.target = "_blank";
+      open.rel = "noopener";
+      open.title = "Откроется сразу с токеном доступа — без экрана «Доступ по приглашению»";
+      actions.append(open);
+    }
+    if (app.serviceId) {
+      const logs = el("button", BUTTON, "Логи");
+      logs.type = "button";
+      if (liveMode === "off") {
+        logs.disabled = true;
+        logs.title = "Нужен RAILWAY_API_TOKEN: перезапустите small dashboard с ним";
+      }
+      logs.addEventListener("click", () => openLogs(app));
+      actions.append(logs);
+    }
+    li.append(actions);
+  }
+
   li.append(el("p", "mt-3 break-all font-mono text-xs text-stone-500 dark:text-stone-400", app.path));
 
   if (app.envNames.length) {
@@ -309,6 +398,53 @@ function card(app) {
   return li;
 }
 
+const BUTTON = "inline-flex items-center rounded-lg border border-stone-300 px-3 py-1.5 text-sm font-medium transition " +
+  "hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-stone-700 dark:hover:bg-stone-800";
+let liveMode = "off";
+const logsState = { app: null, build: false };
+
+function openLogs(app) {
+  logsState.app = app;
+  logsState.build = false;
+  $("logs-title").textContent = "Логи · " + app.name;
+  $("logs").hidden = false;
+  loadLogs();
+}
+
+async function loadLogs() {
+  const { app, build } = logsState;
+  for (const tab of document.querySelectorAll(".logs-tab")) {
+    const active = (tab.dataset.build === "1") === build;
+    tab.className = "logs-tab rounded-md px-3 py-1 " + (active ? "bg-white shadow-sm dark:bg-stone-700" : "text-stone-500 dark:text-stone-400");
+  }
+  $("logs-meta").textContent = "Загрузка…";
+  $("logs-body").textContent = "";
+  try {
+    const res = await fetch("/api/logs?app=" + encodeURIComponent(app.relPath) + "&build=" + (build ? 1 : 0), { cache: "no-store" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+    if (!data.deployment) {
+      $("logs-meta").textContent = "У сервиса ещё нет деплоев";
+      return;
+    }
+    $("logs-meta").textContent = `Деплой ${data.deployment.id} · ${data.deployment.status} · строк: ${data.lines.length}`;
+    $("logs-body").textContent = data.lines.length
+      ? data.lines.map((l) => new Date(l.time).toLocaleTimeString("ru-RU") + "  " + l.message).join("\n")
+      : "Лог пуст";
+    $("logs-body").scrollTop = $("logs-body").scrollHeight;
+  } catch (e) {
+    $("logs-meta").textContent = "Не удалось получить лог: " + e.message;
+  }
+}
+
+for (const tab of document.querySelectorAll(".logs-tab")) {
+  tab.addEventListener("click", () => { logsState.build = tab.dataset.build === "1"; loadLogs(); });
+}
+$("logs-refresh").addEventListener("click", loadLogs);
+$("logs-close").addEventListener("click", () => { $("logs").hidden = true; });
+$("logs").addEventListener("click", (e) => { if (e.target === $("logs")) $("logs").hidden = true; });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("logs").hidden = true; });
+
 async function refresh() {
   const button = $("refresh");
   button.disabled = true;
@@ -317,6 +453,7 @@ async function refresh() {
     const res = await fetch("/api/apps", { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
+    liveMode = data.live;
     $("root").textContent = data.root;
     $("apps").replaceChildren(...data.apps.map(card));
     $("empty").hidden = data.apps.length > 0;

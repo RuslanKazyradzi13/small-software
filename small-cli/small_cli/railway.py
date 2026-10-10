@@ -219,6 +219,20 @@ class Railway:
         project = data["project"]
         return project["name"], [edge["node"] for edge in project["services"]["edges"]]
 
+    def delete_variable(self, project_id, environment_id, service_id, name):
+        self.graphql(
+            "mutation($input: VariableDeleteInput!) { variableDelete(input: $input) }",
+            {"input": {"projectId": project_id, "environmentId": environment_id, "serviceId": service_id,
+                       "name": name}},
+        )
+
+    def redeploy(self, service_id, environment_id):
+        """Перезапустить сервис с текущими переменными (последний образ пересобирать не нужно)."""
+        self.graphql(
+            "mutation($s: String!, $e: String!) { serviceInstanceRedeploy(serviceId: $s, environmentId: $e) }",
+            {"s": service_id, "e": environment_id},
+        )
+
     def delete_project(self, project_id):
         self.graphql("mutation($id: String!) { projectDelete(id: $id) }", {"id": project_id})
 

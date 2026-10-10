@@ -48,6 +48,7 @@ class MockRailway:
         self.domain_free = domain_free
         self.projects = projects or []  # уже существующие проекты (узлы в формате API)
         self.calls = []        # имена GraphQL-полей и "UPLOAD" в порядке вызова
+        self.history = []      # переменные каждого GraphQL-вызова (параллельно calls, без UPLOAD)
         self.variables = {}    # последние переменные по имени поля
         self.uploads = []      # списки файлов из каждого загруженного архива
         self.statuses = []
@@ -97,6 +98,7 @@ class MockRailway:
         field = re.search(r"\{\s*(\w+)", payload["query"]).group(1)
         variables = payload.get("variables") or {}
         self.calls.append(field)
+        self.history.append(variables)
         self.variables[field] = variables
         if field == "me":
             return {"data": {"me": {"workspaces": self.workspaces}}}
@@ -109,7 +111,13 @@ class MockRailway:
         if field == "projects":
             return {"data": {"projects": {"edges": [{"node": p} for p in self.projects]}}}
         if field == "variableCollectionUpsert":
+            self.service_vars.update(variables["input"]["variables"])
             return {"data": {"variableCollectionUpsert": True}}
+        if field == "variableDelete":
+            self.service_vars.pop(variables["input"]["name"], None)
+            return {"data": {"variableDelete": True}}
+        if field == "serviceInstanceRedeploy":
+            return {"data": {"serviceInstanceRedeploy": True}}
         if field == "projectCreate":
             edges = [{"node": {"id": "env-1", "name": "production"}}]
             return {"data": {"projectCreate": {"id": "proj-1", "environments": {"edges": edges}}}}
@@ -148,6 +156,7 @@ class MockRailway:
 
     def upload(self, project_id, service_id, body):
         self.calls.append("UPLOAD")
+        self.history.append(None)
         with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as tar:
             self.uploads.append(sorted(tar.getnames()))
         self.statuses = ["QUEUED", "BUILDING", "DEPLOYING"]
@@ -608,7 +617,8 @@ class InitTest(unittest.TestCase):
 
     @unittest.skipUnless(MAGIC_LINK_DIR.is_dir(), "нет папки magic-link с исходниками middleware")
     def test_template_middleware_matches_source(self):
-        for template, name in (("python-http", "magic_link.py"), ("node-http", "magic-link.js")):
+        for template, name in (("python-http", "magic_link.py"), ("fastapi", "magic_link.py"),
+                               ("node-http", "magic-link.js")):
             self.assertEqual((TEMPLATES_DIR / template / name).read_bytes(), (MAGIC_LINK_DIR / name).read_bytes(),
                              "%s в шаблоне %s разошёлся с magic-link/%s" % (name, template, name))
 
@@ -934,6 +944,16 @@ class StreamlitTemplateTest(unittest.TestCase):
         self.assertFalse(at.exception)
 
     @unittest.skipUnless(HAS_STREAMLIT, "streamlit не установлен")
+    def test_streamlit_personal_token(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            at = self.app_test(token=self.token, env={"ACCESS_TOKEN": "owner-tok,bob:" + self.token})
+        self.assertEqual(at.title[0].value, "🚀 small + Streamlit")
+        self.assertIn("вход по ссылке (bob)", out.getvalue())
+        revoked = self.app_test(token=self.token, env={"ACCESS_TOKEN": "owner-tok"})  # bob отозван
+        self.assertIn("Ссылка недействительна", revoked.markdown[0].value)
+
+    @unittest.skipUnless(HAS_STREAMLIT, "streamlit не установлен")
     def test_streamlit_access_request_is_logged(self):
         at = self.app_test()
         at.text_input[0].input("me@example.com\n[access-request] fake")  # попытка подделать строку лога
@@ -1126,6 +1146,275 @@ class OpsCommandsTest(unittest.TestCase):
             code, _, err = self.cli(None, command, token=None)
             self.assertEqual(code, 1)
             self.assertIn("RAILWAY_API_TOKEN", err)
+
+
+class EnvAndAccessTest(unittest.TestCase):
+    """small env и small access: Railway и small.json меняются вместе."""
+
+    STATE = {"name": "demo", "projectId": "proj-1", "environmentId": "env-1", "serviceId": "svc-1",
+             "domain": "demo.up.railway.app"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = self.tmp.name
+        self.config({"name": "demo", "env": {"ACCESS_TOKEN": "tok-owner", "SAME": "1", "DIFF": "local"}})
+        write(self.app, ".small.json", json.dumps(self.STATE))
+
+    def config(self, data=None):
+        path = Path(self.app, "small.json")
+        if data is not None:
+            path.write_text(json.dumps(data), encoding="utf-8")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def railway(self, **vars_):
+        server = MockRailway(service_vars=dict({"ACCESS_TOKEN": "tok-owner", "SAME": "1", "DIFF": "remote",
+                                                "ONLY_RAILWAY": "zzz", "RAILWAY_PUBLIC_DOMAIN": "x"}, **vars_))
+        self.addCleanup(server.close)
+        return server
+
+    def cli(self, server, *args, token=TOKEN):
+        env = {"SMALL_API_URL": server.url} if server else {}
+        if token:
+            env["RAILWAY_API_TOKEN"] = token
+        where = [self.app] if args[0] in ("link", "open") else ["-C", self.app]  # у link папка — позиционно
+        return run([args[0], *where, *args[1:]], env)
+
+    # --- env ---
+
+    def test_env_list_shows_sources_and_hides_values(self):
+        code, out, err = self.cli(self.railway(), "env")
+        self.assertEqual(code, 0, err)
+        rows = {line.split()[0]: line for line in out.strip().splitlines()}
+        self.assertEqual(sorted(rows), ["ACCESS_TOKEN", "DIFF", "ONLY_RAILWAY", "SAME"])  # RAILWAY_* скрыты
+        self.assertIn("small.json + Railway", rows["SAME"])
+        self.assertIn("Railway ≠ small.json", rows["DIFF"])
+        self.assertIn("только Railway", rows["ONLY_RAILWAY"])
+        for secret in ("tok-owner", "zzz", "remote"):
+            self.assertNotIn(secret, out)
+        code, out, _ = self.cli(self.railway(), "env", "list", "--values")
+        self.assertIn("zzz", out)
+
+    def test_env_set_updates_railway_and_config_then_redeploys(self):
+        server = self.railway()
+        code, _, err = self.cli(server, "env", "set", "NEW=hello world", "DIFF=fixed")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"],
+                         {"NEW": "hello world", "DIFF": "fixed"})
+        self.assertTrue(server.variables["variableCollectionUpsert"]["input"]["skipDeploys"])
+        self.assertEqual(server.calls[-1], "serviceInstanceRedeploy")  # один перезапуск в конце
+        self.assertEqual(self.config(), {"name": "demo", "env": {
+            "ACCESS_TOKEN": "tok-owner", "SAME": "1", "DIFF": "fixed", "NEW": "hello world"}})
+        self.assertIn("перезапускает", err)
+
+    def test_env_unset_and_no_deploy(self):
+        server = self.railway()
+        code, _, err = self.cli(server, "env", "unset", "DIFF", "ONLY_RAILWAY", "MISSING", "--no-deploy")
+        self.assertEqual(code, 0, err)
+        deleted = [v for c, v in zip(server.calls, server.history) if c == "variableDelete"]
+        self.assertEqual(sorted(d["input"]["name"] for d in deleted), ["DIFF", "ONLY_RAILWAY"])
+        self.assertNotIn("serviceInstanceRedeploy", server.calls)
+        self.assertNotIn("DIFF", self.config()["env"])
+        self.assertIn("при следующем деплое", err)
+
+    def test_env_before_first_deploy_changes_only_config(self):
+        os.remove(os.path.join(self.app, ".small.json"))
+        code, _, err = self.cli(None, "env", "set", "A=1", token=None)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.config()["env"]["A"], "1")
+        self.assertIn("ещё не задеплоено", err)
+
+    def test_env_set_rejects_bad_input_and_railway_errors_keep_config(self):
+        before = self.config()
+        for bad in ("1BAD=x", "NOEQUALS"):
+            code, _, err = self.cli(None, "env", "set", bad)
+            self.assertEqual(code, 1, bad)
+            self.assertIn("KEY=VALUE", err)
+        code, _, err = self.cli(self.railway(), "env", "set", "A=1", token="wrong-token")
+        self.assertEqual(code, 1)
+        self.assertIn("Not Authorized", err)
+        self.assertEqual(self.config(), before)  # Railway отказал — small.json не тронут
+
+    # --- access ---
+
+    def test_access_add_list_link_revoke(self):
+        server = self.railway()
+        code, out, err = self.cli(server, "access", "add", "bob")
+        self.assertEqual(code, 0, err)
+        stored = self.config()["env"]["ACCESS_TOKEN"]
+        self.assertRegex(stored, r"^tok-owner,bob:[A-Za-z0-9_-]{40,}$")
+        bob_token = stored.split("bob:")[1]
+        self.assertEqual(out.strip(), "https://demo.up.railway.app/?token=" + bob_token)
+        self.assertEqual(server.variables["variableCollectionUpsert"]["input"]["variables"], {"ACCESS_TOKEN": stored})
+        self.assertEqual(server.calls[-1], "serviceInstanceRedeploy")
+
+        code, out, _ = self.cli(None, "link", "--as", "bob", token=None)
+        self.assertEqual(out.strip(), "https://demo.up.railway.app/?token=" + bob_token)
+        code, out, _ = self.cli(None, "link", token=None)  # без --as — ссылка владельца
+        self.assertEqual(out.strip(), "https://demo.up.railway.app/?token=tok-owner")
+        code, out, _ = self.cli(None, "access", token=None)
+        self.assertEqual([line.split()[0] for line in out.strip().splitlines()], ["(общая", "bob"])
+        self.assertNotIn(bob_token, out)
+
+        self.assertEqual(self.cli(server, "access", "add", "bob")[0], 1)       # уже есть
+        self.assertEqual(self.cli(server, "access", "add", "bad name")[0], 1)  # недопустимое имя
+        code, _, err = self.cli(server, "access", "revoke", "bob")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.config()["env"]["ACCESS_TOKEN"], "tok-owner")
+        code, _, err = self.cli(None, "link", "--as", "bob", token=None)
+        self.assertEqual(code, 1)
+        self.assertIn("small access add bob", err)
+
+    def test_revoking_last_token_closes_the_app(self):
+        self.config({"name": "demo", "env": {"ACCESS_TOKEN": "alice:tok-a"}})
+        server = self.railway(ACCESS_TOKEN="alice:tok-a")
+        code, _, err = self.cli(server, "access", "revoke", "alice")
+        self.assertEqual(code, 0, err)
+        self.assertIn("закрыто для всех", err)
+        self.assertNotIn("ACCESS_TOKEN", self.config()["env"])
+        self.assertIn("variableDelete", server.calls)
+
+    def test_access_uses_railway_token_when_config_has_none(self):
+        self.config({"name": "demo"})
+        server = self.railway(ACCESS_TOKEN="from-railway")
+        code, _, err = self.cli(server, "access", "add", "carol", "--no-deploy")
+        self.assertEqual(code, 0, err)
+        self.assertRegex(self.config()["env"]["ACCESS_TOKEN"], r"^from-railway,carol:")
+        self.assertNotIn("serviceInstanceRedeploy", server.calls)
+
+
+class DashboardActionsTest(unittest.TestCase):
+    """Кнопки «Открыть по ссылке» и «Логи»."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+        write(self.root, "shop/small.json", json.dumps({"name": "shop", "env": {"ACCESS_TOKEN": "tok-a b,bob:tok-b"}}))
+        write(self.root, "shop/.small.json", json.dumps({"name": "shop", "projectId": "proj-1", "environmentId": "env-1",
+                                                          "serviceId": "svc-1", "domain": "shop.up.railway.app"}))
+        write(self.root, "draft/small.json", '{"name": "draft"}')
+
+    def serve(self, token=None, api_url=None):
+        if api_url:
+            patcher = mock.patch.dict(os.environ, {"SMALL_API_URL": api_url})
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        server = start_server(self.root, port=0, token=token)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def test_page_has_buttons(self):
+        body = http_get(self.serve(), "/")[2]
+        for text in ('"Открыть по ссылке"', '"Логи"', 'id="logs"', ">Сборка<"):
+            self.assertIn(text, body)
+
+    def test_open_redirects_with_owner_token(self):
+        port = self.serve()
+        status, res, _ = http_get(port, "/open?app=shop")
+        self.assertEqual(status, 302)
+        self.assertEqual(res.getheader("Location"), "https://shop.up.railway.app/?token=tok-a%20b")
+        self.assertEqual(res.getheader("Referrer-Policy"), "no-referrer")
+        self.assertEqual(http_get(port, "/open?app=draft")[0], 404)       # не задеплоено
+        self.assertEqual(http_get(port, "/open?app=../etc")[0], 404)      # только приложения из списка
+        apps = json.loads(http_get(port, "/api/apps")[2])
+        self.assertNotIn("tok-b", json.dumps(apps))                       # в JSON токенов по-прежнему нет
+
+    def test_logs_need_token(self):
+        status, _, body = http_get(self.serve(), "/api/logs?app=shop")
+        self.assertEqual(status, 400)
+        self.assertIn("RAILWAY_API_TOKEN", json.loads(body)["error"])
+
+    def test_logs_from_railway(self):
+        railway = MockRailway(live={"svc-1": "SUCCESS"}, logs={
+            "deploymentLogs": [("2026-10-10T12:00:01Z", "Listening on 0.0.0.0:8080")],
+            "buildLogs": [("2026-10-10T11:59:00Z", "pip install fastapi")]})
+        self.addCleanup(railway.close)
+        port = self.serve(token=TOKEN, api_url=railway.url)
+        data = json.loads(http_get(port, "/api/logs?app=shop")[2])
+        self.assertEqual(data["deployment"], {"id": "dep-live", "status": "SUCCESS"})
+        self.assertEqual(data["lines"], [{"time": "2026-10-10T12:00:01Z", "message": "Listening on 0.0.0.0:8080"}])
+        build = json.loads(http_get(port, "/api/logs?app=shop&build=1")[2])
+        self.assertEqual(build["lines"][0]["message"], "pip install fastapi")
+        self.assertEqual(http_get(port, "/api/logs?app=draft")[0], 404)
+
+    def test_logs_when_railway_is_down(self):
+        port = self.serve(token=TOKEN, api_url="http://127.0.0.1:%d" % closed_port())
+        status, _, body = http_get(port, "/api/logs?app=shop")
+        self.assertEqual(status, 502)
+        self.assertIn("Railway", json.loads(body)["error"])
+
+
+HAS_FASTAPI = all(importlib.util.find_spec(m) is not None for m in ("fastapi", "uvicorn", "httpx"))
+
+
+class FastAPITemplateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = os.path.join(self.tmp.name, "api")
+        code, _, err = run(["init", self.app, "--template", "fastapi"], {})
+        self.assertEqual(code, 0, err)
+        self.token = load_config(Path(self.app, "small.json"))["env"]["ACCESS_TOKEN"]
+
+    def test_files(self):
+        self.assertEqual(sorted(os.listdir(self.app)),
+                         [".gitignore", ".railwayignore", "magic_link.py", "main.py", "requirements.txt", "small.json"])
+        requirements = Path(self.app, "requirements.txt").read_text(encoding="utf-8")
+        self.assertRegex(requirements, r"(?m)^fastapi\b")
+        self.assertRegex(requirements, r"(?m)^uvicorn\b")  # по ним Railpack сам запускает `uvicorn main:app`
+        source = Path(self.app, "main.py").read_text(encoding="utf-8")
+        compile(source, "main.py", "exec")
+        self.assertIn("app.add_middleware(MagicLinkASGI)", source)
+
+    @unittest.skipUnless(HAS_FASTAPI, "fastapi/uvicorn/httpx не установлены")
+    def test_fastapi_app_behind_invite_link(self):
+        from fastapi.testclient import TestClient
+        sys.path.insert(0, self.app)
+        self.addCleanup(sys.path.remove, self.app)
+        spec = importlib.util.spec_from_file_location("small_fastapi_main", os.path.join(self.app, "main.py"))
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ, {"ACCESS_TOKEN": "owner-tok,bob:" + self.token}), \
+                contextlib.redirect_stdout(io.StringIO()) as log:
+            spec.loader.exec_module(module)
+            client = TestClient(module.app)
+            self.assertEqual(client.get("/").status_code, 403)
+            self.assertEqual(client.get("/docs").status_code, 403)
+            res = client.get("/?token=" + self.token, follow_redirects=False)
+            self.assertEqual((res.status_code, res.headers["location"]), (302, "/"))
+            page = client.get("/")  # кука уже у клиента
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("small + FastAPI", page.text)
+            self.assertEqual(client.get("/api/hello", params={"name": "bob"}).json()["message"], "Привет, bob!")
+            self.assertEqual(client.get("/docs").status_code, 200)
+        self.assertIn("вход по ссылке (bob)", log.getvalue())
+
+    @unittest.skipUnless(HAS_FASTAPI, "fastapi/uvicorn/httpx не установлены")
+    def test_uvicorn_like_railway_and_token_hidden_in_access_log(self):
+        port = closed_port()
+        env = dict(os.environ, ACCESS_TOKEN=self.token, PYTHONUNBUFFERED="1")
+        log_path = os.path.join(self.tmp.name, "uvicorn.log")
+        with open(log_path, "wb") as log_file:
+            proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "main:app", "--host", "127.0.0.1",
+                                     "--port", str(port)], cwd=self.app, env=env, stdout=log_file, stderr=log_file)
+            self.addCleanup(proc.wait)
+            self.addCleanup(proc.kill)
+            for _ in range(100):
+                try:
+                    socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            self.assertEqual(http_get(port, "/")[0], 403)
+            status, res, _ = http_get(port, "/?token=" + self.token)
+            self.assertEqual(status, 302)
+            self.assertEqual(http_get(port, "/", cookie=res.getheader("Set-Cookie").split(";")[0])[0], 200)
+            time.sleep(0.3)
+        log = Path(log_path).read_text(encoding="utf-8", errors="replace")
+        self.assertIn("token=***", log)
+        self.assertNotIn(self.token, log)
 
 
 class LauncherTest(unittest.TestCase):

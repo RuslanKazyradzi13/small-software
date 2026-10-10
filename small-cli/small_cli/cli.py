@@ -6,7 +6,8 @@ small.json с уникальным именем и ACCESS_TOKEN, .gitignore и .
 `small dashboard` поднимает локальную страницу со списком приложений в папке (см. dashboard.py).
 
 `small link` / `small open` — ссылка-приглашение задеплоенного приложения, `small logs` — его логи,
-`small destroy` — удалить его из Railway.
+`small destroy` — удалить его из Railway. `small env` — переменные приложения, `small access` — личные
+ссылки-приглашения (токен на каждого человека с отзывом).
 
 Ход `small deploy`: прочитать small.json -> упаковать код -> найти проект по имени или создать его
 (projectCreate + serviceCreate) -> записать переменные из small.json (variableCollectionUpsert)
@@ -26,11 +27,10 @@ import time
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
 
-from . import __version__, dashboard, scaffold
+from . import __version__, access, dashboard, scaffold
 from .archive import collect_files, make_tarball
-from .config import CONFIG_FILE, STATE_FILE, ConfigError, load_config, load_state, save_state
+from .config import CONFIG_FILE, ENV_NAME_RE, STATE_FILE, ConfigError, load_config, load_state, save_state
 from .railway import Railway, RailwayError, token_from_env
 
 OK_STATUSES = {"SUCCESS", "SLEEPING"}
@@ -105,7 +105,50 @@ def build_parser():
                            "а если его там нет — из переменных сервиса в Railway (нужен RAILWAY_API_TOKEN)."
                            % CONFIG_FILE)
         k.add_argument("path", nargs="?", default=".", help="папка приложения (по умолчанию текущая)")
+        k.add_argument("--as", dest="person", metavar="ИМЯ", help="личная ссылка человека из small access")
         k.set_defaults(func=cmd_link, open=opens)
+
+    e = sub.add_parser("env", help="переменные приложения: список, задать, удалить",
+                       description="Переменные приложения. set/unset меняют их сразу и в Railway, и в %s "
+                                   "(иначе следующий small deploy вернул бы старые значения), затем Railway "
+                                   "перезапускает приложение. Без подкоманды — список." % CONFIG_FILE)
+    e.add_argument("-C", "--path", default=".", help="папка приложения (по умолчанию текущая)")
+    e.set_defaults(func=cmd_env_list, values=False)
+    env_sub = e.add_subparsers(dest="env_command", metavar="<list|set|unset>")
+    el = env_sub.add_parser("list", help="показать переменные (значения скрыты)")
+    el.add_argument("--values", action="store_true", help="показать значения")
+    el.set_defaults(func=cmd_env_list)
+    es = env_sub.add_parser("set", help="задать переменные: small env set KEY=VALUE ...")
+    es.add_argument("pairs", nargs="+", metavar="KEY=VALUE")
+    es.set_defaults(func=cmd_env_set)
+    eu = env_sub.add_parser("unset", help="удалить переменные: small env unset KEY ...")
+    eu.add_argument("names", nargs="+", metavar="KEY")
+    eu.set_defaults(func=cmd_env_unset)
+    for parser_ in (el, es, eu):
+        parser_.add_argument("-C", "--path", default=argparse.SUPPRESS, help="папка приложения")
+    for parser_ in (es, eu):
+        parser_.add_argument("--no-deploy", action="store_true",
+                             help="не перезапускать приложение (изменения вступят в силу при следующем деплое)")
+
+    a = sub.add_parser("access", help="личные ссылки-приглашения: список, выдать, отозвать",
+                       description="Токен на каждого человека. add выдаёт личную ссылку, revoke отзывает её: "
+                                   "ссылка и куки этого человека перестают работать, у остальных всё остаётся. "
+                                   "Токены хранятся в ACCESS_TOKEN (в %s и в Railway)." % CONFIG_FILE)
+    a.add_argument("-C", "--path", default=".", help="папка приложения (по умолчанию текущая)")
+    a.set_defaults(func=cmd_access_list)
+    access_sub = a.add_subparsers(dest="access_command", metavar="<list|add|revoke>")
+    al = access_sub.add_parser("list", help="у кого есть доступ")
+    al.set_defaults(func=cmd_access_list)
+    aa = access_sub.add_parser("add", help="выдать личную ссылку: small access add bob")
+    aa.add_argument("name", metavar="ИМЯ")
+    aa.set_defaults(func=cmd_access_add)
+    ar = access_sub.add_parser("revoke", help="отозвать доступ: small access revoke bob")
+    ar.add_argument("name", metavar="ИМЯ")
+    ar.set_defaults(func=cmd_access_revoke)
+    for parser_ in (al, aa, ar):
+        parser_.add_argument("-C", "--path", default=argparse.SUPPRESS, help="папка приложения")
+    for parser_ in (aa, ar):
+        parser_.add_argument("--no-deploy", action="store_true", help="не перезапускать приложение")
 
     g = sub.add_parser("logs", help="логи приложения из Railway",
                        description="Показать лог последнего деплоя: приложения (по умолчанию) или сборки.")
@@ -152,13 +195,16 @@ def cmd_link(args):
     state = linked_state(root)
     if not state.get("domain"):
         raise CliError("у сервиса нет публичного домена — выполните small deploy")
-    url = "https://%s/" % state["domain"]
-    token, source = access_token(root, state)
+    entries, source = access.current(root, state, warn=say)
+    token = access.pick(entries, args.person)
+    if args.person is not None and token is None:
+        raise CliError("у %s нет личной ссылки. Есть: %s. Выдать: small access add %s"
+                       % (args.person, ", ".join(n or "(общая)" for n, _ in entries) or "—", args.person))
+    link = access.invite_link(state["domain"], token)
     if token:
-        link = url + "?token=" + quote(token, safe="")
-        say("Ссылка-приглашение (ACCESS_TOKEN из %s). Кто её получит, тот войдёт:" % source)
+        say("Ссылка-приглашение%s (ACCESS_TOKEN из %s). Кто её получит, тот войдёт:"
+            % (" для " + args.person if args.person else "", source))
     else:
-        link = url
         say("ACCESS_TOKEN не найден ни в %s, ни в Railway — адрес без токена:" % CONFIG_FILE)
     print(link, flush=True)
     if args.open:
@@ -166,19 +212,149 @@ def cmd_link(args):
     return 0
 
 
-def access_token(root, state):
-    """(первый ACCESS_TOKEN, откуда он) — из small.json, иначе из переменных сервиса в Railway."""
-    raw = load_config(root / CONFIG_FILE)["env"].get("ACCESS_TOKEN")
-    source = CONFIG_FILE
-    if not raw and token_from_env():
-        try:
-            raw = Railway(token_from_env()).service_variables(
-                state["projectId"], state["environmentId"], state["serviceId"]).get("ACCESS_TOKEN")
-            source = "Railway"
-        except RailwayError as e:
-            say("Не удалось прочитать переменные сервиса в Railway: %s" % e)
-    first = (raw or "").split(",")[0].strip()
-    return (first, source) if first else (None, None)
+def is_linked(state):
+    return all(state.get(k) for k in ("projectId", "environmentId", "serviceId"))
+
+
+def change_env(root, set_vars=None, unset=(), deploy=True):
+    """Меняет переменные в Railway (если приложение задеплоено) и в small.json — чтобы они не расходились.
+
+    Сначала Railway: если он откажет, small.json остаётся прежним. Возвращает True, если трогали Railway.
+    """
+    set_vars, unset = dict(set_vars or {}), list(unset)
+    config_path, state = root / CONFIG_FILE, load_state(root / STATE_FILE)
+    load_config(config_path)  # битый small.json — ошибка до любых изменений
+    raw = json.loads(config_path.read_text(encoding="utf-8-sig")) if config_path.is_file() else {}
+
+    if is_linked(state):
+        api = Railway(require_token())
+        ids = (state["projectId"], state["environmentId"], state["serviceId"])
+        existing = api.service_variables(*ids)
+        if set_vars:
+            api.upsert_variables(*ids, set_vars)
+        for name in unset:
+            if name in existing:
+                api.delete_variable(*ids, name)
+        if deploy:
+            api.redeploy(state["serviceId"], state["environmentId"])
+
+    env = raw.setdefault("env", {})
+    env.update(set_vars)
+    for name in unset:
+        env.pop(name, None)
+    config_path.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return is_linked(state)
+
+
+def report_env_change(linked, deploy, what):
+    if not linked:
+        say("%s. Записано в %s; приложение ещё не задеплоено — в Railway попадёт при small deploy."
+            % (what, CONFIG_FILE))
+    elif deploy:
+        say("%s. Обновлено в Railway и %s, Railway перезапускает приложение (small logs -f — следить)."
+            % (what, CONFIG_FILE))
+    else:
+        say("%s. Обновлено в Railway и %s, вступит в силу при следующем деплое." % (what, CONFIG_FILE))
+
+
+def cmd_env_list(args):
+    root = app_dir(args.path)
+    config_env = load_config(root / CONFIG_FILE)["env"]
+    state = load_state(root / STATE_FILE)
+    railway_env = None
+    if is_linked(state):
+        if token_from_env():
+            railway_env = {k: v for k, v in Railway(token_from_env()).service_variables(
+                state["projectId"], state["environmentId"], state["serviceId"]).items() if not k.startswith("RAILWAY_")}
+        else:
+            say("Нет RAILWAY_API_TOKEN — показываю только %s" % CONFIG_FILE)
+    names = sorted(set(config_env) | set(railway_env or {}))
+    if not names:
+        say("Переменных нет. Задать: small env set KEY=VALUE")
+        return 0
+    width = max(len(n) for n in names) + 2
+    for name in names:
+        in_config, in_railway = name in config_env, railway_env is not None and name in railway_env
+        value = railway_env[name] if in_railway else config_env[name]
+        if in_config and in_railway:
+            where = CONFIG_FILE + " + Railway" if config_env[name] == railway_env[name] else "Railway ≠ " + CONFIG_FILE
+        elif in_railway:
+            where = "только Railway"
+        else:
+            where = CONFIG_FILE + (" (в Railway — после small deploy)" if railway_env is not None else "")
+        shown = value if getattr(args, "values", False) else "•" * min(len(value), 8) + " (%d)" % len(value)
+        print("%-*s%-24s %s" % (width, name, shown, where))
+    if not getattr(args, "values", False):
+        say("Значения скрыты: small env list --values")
+    return 0
+
+
+def cmd_env_set(args):
+    root = app_dir(args.path)
+    pairs = {}
+    for pair in args.pairs:
+        name, sep, value = pair.partition("=")
+        if not sep or not ENV_NAME_RE.match(name):
+            raise CliError("ожидается KEY=VALUE (KEY — латиница, цифры, _; не с цифры), получено: %s" % pair)
+        pairs[name] = value
+    linked = change_env(root, set_vars=pairs, deploy=not args.no_deploy)
+    report_env_change(linked, not args.no_deploy, "Заданы: " + ", ".join(sorted(pairs)))
+    return 0
+
+
+def cmd_env_unset(args):
+    root = app_dir(args.path)
+    linked = change_env(root, unset=args.names, deploy=not args.no_deploy)
+    report_env_change(linked, not args.no_deploy, "Удалены: " + ", ".join(args.names))
+    return 0
+
+
+def cmd_access_list(args):
+    root = app_dir(args.path)
+    entries, source = access.current(root, load_state(root / STATE_FILE), warn=say)
+    if not entries:
+        say("ACCESS_TOKEN не задан — защищённое приложение закрыто для всех. Выдать доступ: small access add ИМЯ")
+        return 0
+    say("Доступ (ACCESS_TOKEN из %s):" % source)
+    for name, token in entries:
+        print("  %-24s %s…" % (name or "(общая ссылка)", token[:4]))
+    say("Личная ссылка: small link --as ИМЯ · отозвать: small access revoke ИМЯ")
+    return 0
+
+
+def cmd_access_add(args):
+    root = app_dir(args.path)
+    if not access.NAME_RE.match(args.name):
+        raise CliError("имя — до 40 символов: латиница, цифры, _ . @ -")
+    state = load_state(root / STATE_FILE)
+    entries, _ = access.current(root, state, warn=say)
+    if any(name == args.name for name, _ in entries):
+        raise CliError("у %s уже есть ссылка: small link --as %s" % (args.name, args.name))
+    token = access.new_token()
+    linked = change_env(root, {"ACCESS_TOKEN": access.serialize(entries + [(args.name, token)])},
+                        deploy=not args.no_deploy)
+    report_env_change(linked, not args.no_deploy, "Доступ для %s добавлен" % args.name)
+    if state.get("domain"):
+        say("Личная ссылка для %s:" % args.name)
+        print(access.invite_link(state["domain"], token), flush=True)
+    else:
+        say("Ссылка появится после small deploy: small link --as %s" % args.name)
+    return 0
+
+
+def cmd_access_revoke(args):
+    root = app_dir(args.path)
+    entries, _ = access.current(root, load_state(root / STATE_FILE), warn=say)
+    remaining = [(name, token) for name, token in entries if name != args.name]
+    if len(remaining) == len(entries):
+        raise CliError("у %s нет личной ссылки. Есть: %s"
+                       % (args.name, ", ".join(n or "(общая)" for n, _ in entries) or "—"))
+    if not remaining:
+        say("Это последний токен: после отзыва приложение будет закрыто для всех.")
+    linked = change_env(root, {"ACCESS_TOKEN": access.serialize(remaining)} if remaining else None,
+                        unset=() if remaining else ["ACCESS_TOKEN"], deploy=not args.no_deploy)
+    report_env_change(linked, not args.no_deploy, "Доступ %s отозван — его ссылка и куки перестанут действовать после перезапуска" % args.name)
+    return 0
 
 
 def cmd_logs(args):
@@ -318,7 +494,7 @@ def cmd_init(args):
     if root != Path.cwd().resolve():
         say("  cd \"%s\"" % root)
     say("  small deploy")
-    say("  затем откройте https://<домен>/?token=<ACCESS_TOKEN из %s>" % CONFIG_FILE)
+    say("  small open        # открыть по ссылке-приглашению")
     return 0
 
 

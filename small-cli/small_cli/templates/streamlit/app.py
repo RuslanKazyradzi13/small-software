@@ -40,16 +40,24 @@ def require_access():
 
     Streamlit не умеет ставить куки, поэтому токен остаётся в адресе — так доступ переживает перезагрузку
     страницы. Без верного токена показывается экран «Доступ по приглашению» с кнопкой «Запросить доступ».
-    ACCESS_TOKEN может содержать несколько токенов через запятую; ACCESS_REQUEST_URL — куда ведёт кнопка.
+    ACCESS_TOKEN — токены через запятую, можно с именами: "alice:токен1,bob:токен2" (так их ведёт `small access`);
+    ACCESS_REQUEST_URL — куда ведёт кнопка.
     """
     if st.session_state.get("access_granted"):
         return
-    tokens = [t.strip() for t in os.environ.get("ACCESS_TOKEN", "").split(",") if t.strip()]
-    if not tokens:
+    entries = []  # "alice:токен1,bob:токен2" -> [("alice", "токен1"), ("bob", "токен2")]
+    for item in os.environ.get("ACCESS_TOKEN", "").split(","):
+        name, _, token = item.strip().rpartition(":")
+        if token.strip():
+            entries.append((name.strip(), token.strip()))
+    if not entries:
         _warn_once("[magic-link] ACCESS_TOKEN не задан: доступ закрыт для всех")
     given = st.query_params.get("token")
-    if given is not None and any(hmac.compare_digest(given.encode(), t.encode()) for t in tokens):
+    owner = next((name for name, token in entries
+                  if given is not None and hmac.compare_digest(given.encode(), token.encode())), None)
+    if owner is not None:
         st.session_state.access_granted = True
+        print("[magic-link] вход по ссылке%s" % (" (%s)" % owner if owner else ""), flush=True)
         return
 
     _, center, _ = st.columns([1, 2, 1])
