@@ -47,7 +47,7 @@ app.wsgi_app = MagicLink(app.wsgi_app)      # Flask
 
 Для Django: в `wsgi.py` `application = MagicLink(get_wsgi_application())`. Параметры конструктора
 (`tokens=`, `request_url=`, `cookie_name=`, `max_age=`) переопределяют переменные окружения.
-Пример с `wsgiref`: [../test-app/app.py](../test-app/app.py).
+Пример с `wsgiref`: шаблон [python-http/app.py](../small-cli/small_cli/templates/python-http/app.py).
 
 **Node.js**
 
@@ -67,9 +67,9 @@ http.createServer((req, res) => guard(req, res, () => handler(req, res)));
 
 - **Токен общий.** Нет пользователей и нет отзыва доступа у одного человека. Чтобы отозвать доступ, смените
   `ACCESS_TOKEN` (все выданные куки перестанут работать) или выдавайте по токену на человека и удаляйте нужный.
-- **Первый запрос `/?token=...` попадает в access-логи** сервера и прокси Railway. В
-  [test-app](../test-app/app.py) токен в логах маскируется (`token=***`). В своём сервере (gunicorn, morgan)
-  сделайте так же или отключите логирование query-строк.
+- **Первый запрос `/?token=...` попадает в access-логи** сервера и прокси Railway. В шаблоне
+  [python-http](../small-cli/small_cli/templates/python-http/app.py) токен в логах маскируется (`token=***`).
+  В своём сервере (gunicorn, morgan) сделайте так же или отключите логирование query-строк.
 - ASGI (FastAPI, Starlette) не поддерживается.
 - Это защита «от случайных глаз» для демо и внутренних инструментов. Для чувствительных данных нужна полноценная авторизация.
 
