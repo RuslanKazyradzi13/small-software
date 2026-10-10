@@ -263,7 +263,9 @@ PAGE = r"""<!doctype html>
   <div id="error" hidden class="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300"></div>
 </main>
 
-<div id="logs" hidden class="fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4">
+<!-- У #logs нет display-класса: Tailwind-класс вроде "flex" перебил бы атрибут hidden, и окно было бы видно сразу. -->
+<div id="logs" hidden class="fixed inset-0 z-10 bg-black/50">
+ <div id="logs-backdrop" class="flex h-full items-center justify-center p-4">
   <div class="flex max-h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl bg-white shadow-xl dark:bg-stone-900">
     <div class="flex flex-wrap items-center gap-2 border-b border-stone-200 px-4 py-3 dark:border-stone-800">
       <h2 id="logs-title" class="mr-auto min-w-0 truncate font-semibold"></h2>
@@ -277,6 +279,7 @@ PAGE = r"""<!doctype html>
     <p id="logs-meta" class="px-4 pt-2 text-xs text-stone-500 dark:text-stone-400"></p>
     <pre id="logs-body" class="m-0 flex-1 overflow-auto whitespace-pre-wrap break-all px-4 py-3 font-mono text-xs leading-relaxed"></pre>
   </div>
+ </div>
 </div>
 
 <script>
@@ -442,7 +445,9 @@ for (const tab of document.querySelectorAll(".logs-tab")) {
 }
 $("logs-refresh").addEventListener("click", loadLogs);
 $("logs-close").addEventListener("click", () => { $("logs").hidden = true; });
-$("logs").addEventListener("click", (e) => { if (e.target === $("logs")) $("logs").hidden = true; });
+$("logs").addEventListener("click", (e) => {  // клик по затемнённому фону вокруг окна
+  if (e.target === $("logs") || e.target === $("logs-backdrop")) $("logs").hidden = true;
+});
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("logs").hidden = true; });
 
 async function refresh() {

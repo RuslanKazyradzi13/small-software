@@ -1310,6 +1310,9 @@ class DashboardActionsTest(unittest.TestCase):
         body = http_get(self.serve(), "/")[2]
         for text in ('"Открыть по ссылке"', '"Логи"', 'id="logs"', ">Сборка<"):
             self.assertIn(text, body)
+        # Tailwind-класс display (flex, grid, block) перебивает атрибут hidden: окно было бы открыто сразу.
+        modal_classes = re.search(r'<div id="logs" hidden class="([^"]*)"', body).group(1).split()
+        self.assertFalse({"flex", "grid", "block", "inline-flex"} & set(modal_classes), modal_classes)
 
     def test_open_redirects_with_owner_token(self):
         port = self.serve()
