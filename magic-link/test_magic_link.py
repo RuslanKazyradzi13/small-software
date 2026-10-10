@@ -2,10 +2,14 @@
 
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import os
+import re
+import shutil
 import socket
+import tempfile
 import threading
 import time
 import unittest
@@ -13,13 +17,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 from wsgiref.util import setup_testing_defaults
 
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit
 
 import magic_link
 from magic_link import (COOKIE_NAME, LINK_TTL, MagicLink, MagicLinkASGI, MagicLinkGate, _cookie_value, parse_emails,
                         parse_tokens)
 
 TOKEN = "s3cret-token"
+
+
+def events(log):
+    """The JSON lines (sign-ins, refusals, access requests) of a log, as dicts."""
+    return [json.loads(line) for line in log.splitlines() if line.startswith("{")]
 
 
 def secret_app(environ, start_response):
@@ -115,8 +124,10 @@ class MagicLinkTest(unittest.TestCase):
         self.assertIn("Запрос отправлен", body)
         self.assertNotIn("<form", body)
         self.assertEqual(log.count("\n"), 1)  # a newline from the form doesn't produce a forged log line
-        self.assertIn("contact='@ivan\\n[access-request] fake'", log)
-        self.assertIn("ip=203.0.113.7", log)
+        [event] = events(log)
+        self.assertEqual(event["message"], "[access-request] contact='@ivan\\n[access-request] fake' ip=203.0.113.7 ua=''")
+        self.assertEqual((event["level"], event["magic_link"], event["user"], event["ip"]),
+                         ("warn", "request", "@ivan\n[access-request] fake", "203.0.113.7"))
 
     def test_request_url_replaces_form_with_link(self):
         app = MagicLink(secret_app, tokens=TOKEN, request_url='mailto:owner@example.com?subject=Доступ"')
@@ -140,7 +151,8 @@ class NamedTokensTest(unittest.TestCase):
         app = MagicLink(secret_app, tokens="alice:tok-a,bob:tok-b", request_url="")
         status, headers, _, log = call(app, query="token=tok-b")
         self.assertEqual(status, "302 Found")
-        self.assertIn("вход по ссылке (bob)", log)
+        self.assertEqual([(e["message"], e["magic_link"], e["method"], e["user"]) for e in events(log)],
+                         [("[magic-link] вход по ссылке: bob, ip —", "sign_in", "link", "bob")])
         self.assertNotIn("tok-b", log)
         bob_cookie = headers["Set-Cookie"].split(";")[0]
         alice_cookie = "%s=%s" % (COOKIE_NAME, _cookie_value("tok-a"))
@@ -204,7 +216,7 @@ class MagicLinkASGITest(unittest.TestCase):
         self.assertTrue(headers["set-cookie"].startswith(self.cookie + ";"))
         for flag in ("HttpOnly", "SameSite=Lax", "Secure"):
             self.assertIn(flag, headers["set-cookie"])
-        self.assertIn("вход по ссылке, ip=127.0.0.1", log)
+        self.assertEqual(events(log)[0]["message"], "[magic-link] вход по ссылке, ip 127.0.0.1")
 
     def test_cookie_passes_and_bad_credentials_do_not(self):
         self.assertEqual(asgi_call(self.app, cookie=self.cookie)[:3][2], "secret page")
@@ -238,13 +250,13 @@ class MagicLinkASGITest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("Запрос отправлен", body)
         self.assertEqual(log.count("\n"), 1)  # the newline from the form is escaped: a single log line
-        self.assertIn("contact='@ivan\\nfake' ip=203.0.113.7", log)
+        self.assertIn("contact='@ivan\\nfake' ip=203.0.113.7", events(log)[0]["message"])
 
     def test_named_tokens_and_revocation(self):
         app = MagicLinkASGI(secret_asgi, tokens="alice:tok-a,bob:tok-b", request_url="")
         status, headers, _, _, log = asgi_call(app, query="token=tok-b")
         self.assertEqual(status, 302)
-        self.assertIn("(bob)", log)
+        self.assertEqual(events(log)[0]["user"], "bob")
         bob_cookie = headers["set-cookie"].split(";")[0]
         revoked = MagicLinkASGI(secret_asgi, tokens="alice:tok-a", request_url="")
         self.assertEqual(asgi_call(revoked, cookie=bob_cookie)[0], 403)
@@ -336,7 +348,9 @@ class EmailLoginTest(EmailLoginBase):
         self.assertTrue(cookie.startswith(COOKIE_NAME + "=e."))
         for flag in ("HttpOnly", "SameSite=Lax", "Secure", "Max-Age=2592000"):
             self.assertIn(flag, cookie)
-        self.assertIn("вход по почте (ivan@company.com)", log)
+        [event] = events(log)
+        self.assertEqual((event["message"], event["method"], event["user"]),
+                         ("[magic-link] вход по почте: ivan@company.com, ip —", "email", "ivan@company.com"))
         status, _, body, _ = call(self.app, cookie=cookie.split(";")[0])
         self.assertEqual((status, body), ("200 OK", "secret page"))
 
@@ -513,7 +527,7 @@ class EmailLoginASGITest(EmailLoginBase):
         status, headers, _, _, log = asgi_call(self.app, path="/_access/verify", method="POST",
                                                body=urlencode({"t": token}).encode())
         self.assertEqual((status, headers["location"]), (302, "/"))
-        self.assertIn("вход по почте (olga@team.com)", log)
+        self.assertEqual(events(log)[0]["user"], "olga@team.com")
         cookie = headers["set-cookie"].split(";")[0]
         self.assertEqual(asgi_call(self.app, cookie=cookie)[2], "secret page")
         *_, sent, _ = asgi_call(self.app, kind="websocket", cookie=cookie)
@@ -575,7 +589,9 @@ class MagicLinkGateTest(EmailLoginBase):
     def test_unknown_address_gets_the_same_answer_and_becomes_a_request(self):
         result, log = quiet(self.app.start_login, "stranger@evil.example", self.HEADERS)
         self.assertEqual(result, "check")
-        self.assertEqual(log, "[access-request] contact='stranger@evil.example' ip=203.0.113.7 ua='agent\\n007'\n")
+        self.assertEqual(log.count("\n"), 1)
+        self.assertEqual(events(log)[0]["message"],
+                         "[access-request] contact='stranger@evil.example' ip=203.0.113.7 ua='agent\\n007'")
         time.sleep(0.2)
         self.assertEqual(self.sent, [])
 
@@ -596,7 +612,8 @@ class MagicLinkGateTest(EmailLoginBase):
             self.assertEqual(self.app.login_email(token), "ivan@company.com")
         session, log = quiet(self.app.finish_login, token, self.HEADERS)
         self.assertTrue(session.startswith("e."), session)
-        self.assertEqual(log, "[magic-link] вход по почте (ivan@company.com), ip=203.0.113.7\n")
+        self.assertEqual([(e["message"], e["ua"]) for e in events(log)],
+                         [("[magic-link] вход по почте: ivan@company.com, ip 203.0.113.7", "agent\n007")])
         self.assertEqual(self.app.session_owner(session), "ivan@company.com")
         self.assertIsNone(self.app.finish_login(token))
         self.assertIsNone(self.app.login_email(token))
@@ -661,7 +678,8 @@ class MagicLinkGateTest(EmailLoginBase):
 
     def test_invitation_tokens(self):
         name, log = quiet(self.app.token_login, "tok-a", self.HEADERS)
-        self.assertEqual((name, log), ("alice", "[magic-link] вход по ссылке (alice), ip=203.0.113.7\n"))
+        self.assertEqual((name, [e["message"] for e in events(log)]),
+                         ("alice", ["[magic-link] вход по ссылке: alice, ip 203.0.113.7"]))
         self.assertEqual(quiet(self.make(tokens="tok-b").token_login, "tok-b")[0], "")  # shared link, no name
         for bad in ("wrong", "", None, "tok-a "):
             self.assertEqual(quiet(self.app.token_login, bad), (None, ""), bad)
@@ -683,9 +701,10 @@ class MagicLinkGateTest(EmailLoginBase):
     def test_request_access_is_one_log_line(self):
         _, log = quiet(self.app.request_access, " me@example.com\n[access-request] fake " + "x" * 300, self.HEADERS)
         self.assertEqual(log.count("\n"), 1)
-        self.assertIn("[access-request] contact='me@example.com\\n[access-request] fake xxx", log)
-        self.assertIn("' ip=203.0.113.7 ua='agent\\n007'", log)
-        self.assertLess(len(log), 300)  # the contact is cut to 200 characters
+        [event] = events(log)
+        self.assertIn("[access-request] contact='me@example.com\\n[access-request] fake xxx", event["message"])
+        self.assertIn("' ip=203.0.113.7 ua='agent\\n007'", event["message"])
+        self.assertEqual(len(event["user"]), 200)  # the contact is cut to 200 characters
 
     def test_login_link_for_other_delivery(self):
         link = self.app.login_link(" Ivan@Company.com", "https://reports.company.com/", "/")
@@ -922,8 +941,8 @@ class TelegramTest(unittest.TestCase):
             for word in words:
                 self.assertIn(word, text)
             self.inbox.messages.clear()
-            login = "signed in by link (bob)" if owner_lang == "en" else "вход по ссылке (bob)"
-            self.assertIn("[magic-link] " + login, log)
+            login = "signed in by link: bob" if owner_lang == "en" else "вход по ссылке: bob"
+            self.assertEqual(events(log)[0]["message"], "[magic-link] %s, ip —" % login)
 
     def test_telegram_down_does_not_break_the_request(self):
         with socket.socket() as s:
@@ -934,6 +953,585 @@ class TelegramTest(unittest.TestCase):
             status, _, body, _ = call(app, path="/_access/request", method="POST", body=b"contact=x")
         self.assertEqual(status, "200 OK")
         self.assertIn("Запрос отправлен", body)
+
+
+
+def call_raw(app, path, query="", cookie=None, method="GET", body=b"", quiet_log=True):
+    """(status, header list) of a WSGI call: unlike call(), keeps repeated headers such as two Set-Cookie."""
+    environ = {"PATH_INFO": path, "QUERY_STRING": query, "REQUEST_METHOD": method, "HTTP_X_FORWARDED_PROTO": "https",
+               "wsgi.input": io.BytesIO(body), "CONTENT_LENGTH": str(len(body))}
+    if cookie:
+        environ["HTTP_COOKIE"] = cookie
+    setup_testing_defaults(environ)
+    captured = {}
+
+    def start_response(status, headers):
+        captured.update(status=status, headers=headers)
+
+    with (contextlib.redirect_stdout(io.StringIO()) if quiet_log else contextlib.nullcontext()):
+        b"".join(app(environ, start_response))
+    return captured["status"], captured["headers"]
+
+
+class OidcProvider:
+    """Google / Microsoft token endpoint mock: records the code exchange and answers with an ID token made of the
+    claims the test sets (unsigned: the app trusts TLS to the token endpoint, as OpenID Connect allows)."""
+
+    def __init__(self):
+        self.requests, self.claims, self.status = [], {}, 200
+        box = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                form = dict(parse_qsl(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()))
+                box.requests.append((self.path, form))
+                if box.status == 200:
+                    claims = box.claims(form) if callable(box.claims) else box.claims
+                    token = ".".join(magic_link._b64(json.dumps(part).encode()) for part in ({"alg": "RS256"}, claims))
+                    raw = json.dumps({"access_token": "at", "id_token": token + ".c2ln"}).encode()
+                else:
+                    raw = json.dumps({"error": "invalid_grant", "error_description": "Bad code"}).encode()
+                self.send_response(box.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = "http://127.0.0.1:%d" % self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+TENANT = "72f988bf-86f1-41af-91ab-2d7cd011db47"
+
+
+class SsoBase(unittest.TestCase):
+    """Single sign-on against OidcProvider: Google and Microsoft are set up, email is not."""
+
+    EMAILS = "ivan@company.com, @team.com, olga.gmail@gmail.com"
+
+    def setUp(self):
+        self.provider = OidcProvider()
+        self.addCleanup(self.provider.close)
+        env = mock.patch.dict(os.environ, {
+            "RAILWAY_PUBLIC_DOMAIN": "reports.up.railway.app", "PUBLIC_URL": "", "LOGIN_LINKS_TO_LOG": "",
+            "RESEND_API_KEY": "", "SMTP_URL": "", "ACCESS_DB": "", "RAILWAY_VOLUME_MOUNT_PATH": "",
+            "SESSIONS_REVOKED": "",
+            "GOOGLE_CLIENT_ID": "123-abc.apps.googleusercontent.com", "GOOGLE_CLIENT_SECRET": "GOCSPX-secret",
+            "GOOGLE_AUTH_URL": "https://accounts.google.test/auth", "GOOGLE_TOKEN_URL": self.provider.url + "/google",
+            "MICROSOFT_CLIENT_ID": "ms-client", "MICROSOFT_CLIENT_SECRET": "ms-secret",
+            "MICROSOFT_TENANT_ID": TENANT.upper(), "MICROSOFT_LOGIN_URL": self.provider.url})
+        env.start()
+        self.addCleanup(env.stop)
+        self.app = self.make()
+
+    def make(self, emails=None):
+        return quiet(MagicLink, secret_app, tokens="", request_url="", emails=emails or self.EMAILS,
+                     secret="test-secret")[0]
+
+    def start(self, provider="google", app=None):
+        """GET /_access/sso/<provider>: (query of the authorization URL, state cookie for the callback)."""
+        status, headers, _, _ = call(app or self.app, path="/_access/sso/" + provider,
+                                     headers={"HTTP_X_FORWARDED_PROTO": "https"})
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        return dict(parse_qsl(urlsplit(headers["Location"]).query)), headers["Set-Cookie"].split(";")[0]
+
+    def google(self, nonce, /, **claims):
+        base = {"iss": "https://accounts.google.com", "aud": "123-abc.apps.googleusercontent.com", "sub": "1",
+                "exp": int(time.time()) + 3600, "iat": int(time.time()), "nonce": nonce,
+                "email": "ivan@company.com", "email_verified": True, "hd": "company.com"}
+        return {k: v for k, v in dict(base, **claims).items() if v is not None}
+
+    def microsoft(self, nonce, /, **claims):
+        base = {"iss": "https://login.microsoftonline.com/%s/v2.0" % TENANT, "aud": "ms-client", "tid": TENANT,
+                "exp": int(time.time()) + 3600, "iat": int(time.time()), "nonce": nonce, "oid": "o1",
+                "preferred_username": "Ivan@Company.com"}
+        return {k: v for k, v in dict(base, **claims).items() if v is not None}
+
+    def finish(self, query, cookie, app=None, **params):
+        values = dict({"code": "4/0Abc", "state": query["state"]}, **params)
+        return call(app or self.app, path="/_access/sso/callback", query=urlencode(values), cookie=cookie,
+                    headers={"HTTP_X_FORWARDED_PROTO": "https", "HTTP_X_FORWARDED_FOR": "203.0.113.9",
+                             "HTTP_USER_AGENT": "Firefox"})
+
+    def sign_in(self, provider="google", app=None, **claims):
+        """The whole round trip: (status, headers, body, log) of the callback."""
+        query, cookie = self.start(provider, app)
+        self.provider.claims = getattr(self, provider)(query["nonce"], **claims)
+        return self.finish(query, cookie, app)
+
+
+class SsoTest(SsoBase):
+    def test_sign_in_page_offers_the_providers_and_no_email_form_without_mail(self):
+        status, headers, body, _ = call(self.app)
+        self.assertEqual(headers["X-Frame-Options"], "DENY")
+        self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
+        self.assertIn("form-action 'self'", headers["Content-Security-Policy"])
+        self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+        self.assertNotIn("<script", body)
+        self.assertEqual(status, "403 Forbidden")
+        self.assertIn("Вход рабочим аккаунтом", body)
+        self.assertIn('href="/_access/sso/google"', body)
+        self.assertIn('href="/_access/sso/microsoft"', body)
+        self.assertLess(body.index("Войти через Google"), body.index("Войти через Microsoft"))
+        self.assertNotIn('type="email"', body)  # email isn't set up: no form that would send nothing
+        with mock.patch.dict(os.environ, {"LOGIN_LINKS_TO_LOG": "1"}):
+            body = call(self.make())[2]
+        self.assertIn("или по ссылке на почту", body)
+        self.assertIn('type="email"', body)
+        self.assertIn("Sign in with Google", call(self.app, headers={"HTTP_ACCEPT_LANGUAGE": "en"})[2])
+
+    def test_authorization_request(self):
+        query, cookie = self.start()
+        self.assertEqual({k: query[k] for k in ("client_id", "redirect_uri", "response_type", "scope",
+                                                "code_challenge_method", "prompt")},
+                         {"client_id": "123-abc.apps.googleusercontent.com", "response_type": "code",
+                          "redirect_uri": "https://reports.up.railway.app/_access/sso/callback",
+                          "scope": "openid email", "code_challenge_method": "S256", "prompt": "select_account"})
+        self.assertTrue(query["state"].startswith("google.") and len(query["state"]) > 30, query["state"])
+        self.assertGreater(len(query["nonce"]), 30)
+        self.assertNotIn(query["nonce"], cookie)  # derived from the state, not carried in the cookie
+        query2, _ = self.start()
+        self.assertNotEqual((query["state"], query["nonce"], query["code_challenge"]),
+                            (query2["state"], query2["nonce"], query2["code_challenge"]))
+        _, headers, _, _ = call(self.app, path="/_access/sso/google", headers={"HTTP_X_FORWARDED_PROTO": "https"})
+        for flag in ("small_access_sso=", "HttpOnly", "SameSite=Lax", "Secure", "Max-Age=600", "Path=/"):
+            self.assertIn(flag, headers["Set-Cookie"])
+        ms, _ = self.start("microsoft")
+        self.assertEqual((ms["client_id"], ms["response_mode"], ms["scope"]), ("ms-client", "query", "openid profile email"))
+        self.assertEqual(call(self.app, path="/_access/sso/github")[0], "400 Bad Request")
+
+    def test_google_sign_in(self):
+        query, cookie = self.start()
+        self.provider.claims = self.google(query["nonce"])
+        status, headers, _, log = self.finish(query, cookie)
+        self.assertEqual((status, headers["Location"]), ("302 Found", "/"))
+        session = headers["Set-Cookie"].split(";")[0]
+        self.assertTrue(session.startswith(COOKIE_NAME + "=e."), session)
+        self.assertEqual(call(self.app, cookie=session)[2], "secret page")
+        # The code exchange: the right endpoint, our secret, the same redirect URI and the PKCE verifier.
+        path, form = self.provider.requests[0]
+        self.assertEqual(path, "/google")
+        self.assertEqual({k: form[k] for k in ("grant_type", "code", "redirect_uri", "client_id", "client_secret")},
+                         {"grant_type": "authorization_code", "code": "4/0Abc", "client_id": query["client_id"],
+                          "redirect_uri": query["redirect_uri"], "client_secret": "GOCSPX-secret"})
+        challenge = magic_link._b64(hashlib.sha256(form["code_verifier"].encode()).digest())
+        self.assertEqual(challenge, query["code_challenge"])
+        [event] = events(log)
+        self.assertEqual({k: event[k] for k in ("message", "magic_link", "method", "user", "ip", "ua")},
+                         {"message": "[magic-link] вход через Google: ivan@company.com, ip 203.0.113.9",
+                          "magic_link": "sign_in", "method": "google", "user": "ivan@company.com",
+                          "ip": "203.0.113.9", "ua": "Firefox"})
+        self.assertNotIn("GOCSPX-secret", log)
+        self.assertNotIn("4/0Abc", log)
+
+    def test_callback_cookies_and_replay(self):
+        query, cookie = self.start()
+        self.provider.claims = self.google(query["nonce"])
+        callback = "code=c&" + urlencode({"state": query["state"]})
+        status, headers = call_raw(self.app, "/_access/sso/callback", callback, cookie)
+        cookies = [v for k, v in headers if k == "Set-Cookie"]
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(cookies[0], "small_access_sso=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure")
+        self.assertTrue(cookies[1].startswith(COOKIE_NAME + "=e."), cookies)
+        # The same answer again (a stolen callback URL with the cookie): refused, the state is spent.
+        self.assertEqual(call_raw(self.app, "/_access/sso/callback", callback, cookie)[0], "400 Bad Request")
+
+    def test_microsoft_sign_in(self):
+        status, headers, _, log = self.sign_in("microsoft")
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(self.app.gate.session_owner(headers["Set-Cookie"].split(";")[0].split("=", 1)[1]),
+                         "ivan@company.com")
+        self.assertEqual(self.provider.requests[0][0], "/%s/oauth2/v2.0/token" % TENANT)
+        self.assertEqual(events(log)[0]["method"], "microsoft")
+
+    def test_whole_domain_and_gmail(self):
+        self.assertEqual(self.sign_in(email="olga@team.com", hd="team.com")[0], "302 Found")
+        # A Gmail address is Google's own: no hd needed.
+        self.assertEqual(self.sign_in(email="olga.gmail@gmail.com", hd=None)[0], "302 Found")
+
+    def test_google_accounts_google_does_not_vouch_for_are_refused(self):
+        # A personal Google account registered with a company address: no hd, so it may outlive the mailbox.
+        status, headers, body, log = self.sign_in(hd=None)
+        self.assertEqual(status, "403 Forbidden")
+        self.assertIn("Нужен рабочий аккаунт", body)
+        self.assertIn("ivan@company.com", body)
+        self.assertNotIn(COOKIE_NAME + "=e.", headers.get("Set-Cookie", ""))
+        self.assertIn("personal Google account", log)
+        self.assertEqual(self.sign_in(email_verified=False)[0], "403 Forbidden")
+        self.assertEqual(self.sign_in(email_verified="false")[0], "403 Forbidden")
+
+    def test_microsoft_guests_and_other_tenants_are_refused(self):
+        other = "11111111-2222-3333-4444-555555555555"
+        status, _, body, _ = self.sign_in("microsoft", idp="https://sts.windows.net/%s/" % other)
+        self.assertEqual(status, "403 Forbidden")  # a guest from another tenant
+        self.assertIn("Нужен рабочий аккаунт", body)
+        self.assertEqual(self.sign_in("microsoft", idp="live.com")[0], "403 Forbidden")
+        self.assertEqual(self.sign_in("microsoft", preferred_username="ivan_company.com#EXT#@corp.onmicrosoft.com")[0],
+                         "403 Forbidden")
+        # A member's idp, if present, names our tenant.
+        self.assertEqual(self.sign_in("microsoft", idp="https://sts.windows.net/%s/" % TENANT)[0], "302 Found")
+        # Tokens of another tenant: a different issuer or tid.
+        self.assertEqual(self.sign_in("microsoft", tid=other)[0], "400 Bad Request")
+        self.assertEqual(self.sign_in("microsoft", iss="https://login.microsoftonline.com/%s/v2.0" % other)[0],
+                         "400 Bad Request")
+
+    def test_tampered_tokens_are_refused(self):
+        now = int(time.time())
+        for claims in ({"aud": "another-app"}, {"aud": ["another-app", "123-abc.apps.googleusercontent.com"]},
+                       {"exp": now - 3600}, {"exp": None}, {"iat": now + 3600}, {"nonce": "another-nonce"},
+                       {"nonce": None}, {"iss": "https://evil.example"}, {"email": None}, {"email": "not-an-email"}):
+            status, headers, body, log = self.sign_in(**claims)
+            self.assertEqual(status, "400 Bad Request", claims)
+            self.assertIn("Не удалось войти", body)
+            self.assertNotIn(COOKIE_NAME + "=e.", headers.get("Set-Cookie", ""))
+            self.assertIn("[magic-link] вход через провайдера не удался", log)
+        # A list audience with us is fine when azp says it was issued to us.
+        self.assertEqual(self.sign_in(aud=["123-abc.apps.googleusercontent.com", "x"],
+                                      azp="123-abc.apps.googleusercontent.com")[0], "302 Found")
+
+    def test_state_ties_the_answer_to_the_browser(self):
+        query, cookie = self.start()
+        self.provider.claims = self.google(query["nonce"])
+        other_query, other_cookie = self.start()
+        self.assertEqual(self.finish(query, other_cookie)[0], "400 Bad Request")  # login CSRF: another browser's state
+        self.assertEqual(self.finish(query, None)[0], "400 Bad Request")
+        self.assertEqual(self.finish(dict(query, state="google.forged"), cookie)[0], "400 Bad Request")
+        self.assertEqual(self.finish(dict(query, state=query["state"].replace("google", "microsoft")), cookie)[0],
+                         "400 Bad Request")  # same state, other provider: the nonce won't match
+        with mock.patch("magic_link.time.time", return_value=time.time() + 601):
+            self.assertEqual(self.finish(query, cookie)[0], "400 Bad Request")  # 10 minutes passed
+        self.assertEqual(len(self.provider.requests), 1)  # only the swapped-provider try reached a token endpoint
+        self.assertEqual(self.finish(query, cookie)[0], "302 Found")
+
+    def test_provider_errors(self):
+        query, cookie = self.start()
+        status, _, body, log = self.finish(query, cookie, error="access_denied")
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn("access_denied", log)
+        self.assertEqual(self.provider.requests, [])
+        self.assertEqual(self.finish(query, cookie, code="")[0], "400 Bad Request")
+        self.provider.status = 400
+        status, _, _, log = self.finish(query, cookie)
+        self.assertEqual(status, "400 Bad Request")
+        self.assertIn("HTTP 400 invalid_grant", log)
+        self.assertNotIn("GOCSPX-secret", log)
+        with mock.patch.dict(os.environ, {"GOOGLE_TOKEN_URL": "http://127.0.0.1:9"}):
+            app = self.make()
+        query, cookie = self.start(app=app)
+        self.assertEqual(self.finish(query, cookie, app=app)[0], "400 Bad Request")
+
+    def test_an_address_without_access_becomes_an_access_request(self):
+        status, headers, body, log = self.sign_in(email="stranger@evil.example", hd="evil.example")
+        self.assertEqual(status, "403 Forbidden")
+        self.assertIn("Нет доступа", body)
+        self.assertIn("stranger@evil.example", body)
+        self.assertIn('href="/"', body)  # "Use a different account"
+        self.assertEqual([(e["magic_link"], e["user"]) for e in events(log)],
+                         [("denied", "stranger@evil.example"), ("request", "stranger@evil.example")])
+        self.assertNotIn(COOKIE_NAME + "=e.", headers.get("Set-Cookie", ""))
+
+    def test_sessions_follow_the_access_list(self):
+        session = self.sign_in()[1]["Set-Cookie"].split(";")[0]
+        self.assertEqual(call(self.make(emails="@team.com"), cookie=session)[0], "403 Forbidden")
+
+    def test_settings(self):
+        self.assertEqual(list(self.app.gate.sso), ["google", "microsoft"])
+        for broken in ({"MICROSOFT_TENANT_ID": "company.com"}, {"MICROSOFT_TENANT_ID": ""},
+                       {"MICROSOFT_CLIENT_SECRET": ""}):
+            with mock.patch.dict(os.environ, broken):
+                gate, log = quiet(MagicLinkGate, emails=self.EMAILS)
+            self.assertEqual(gate.sso, ("google",), broken)
+            self.assertIn("MICROSOFT_TENANT_ID", log)
+        with mock.patch.dict(os.environ, {"GOOGLE_CLIENT_SECRET": "", "MICROSOFT_CLIENT_ID": ""}):
+            gate, log = quiet(MagicLinkGate, emails=self.EMAILS)
+        self.assertEqual(gate.sso, ())
+        self.assertIn("почта не настроена", log)
+        self.assertEqual(quiet(MagicLinkGate, emails="")[0].sso, ())  # no ACCESS_EMAILS: nobody to sign in
+        # Without ACCESS_EMAILS the sign-on endpoints are off too.
+        app = quiet(MagicLink, secret_app, tokens="tok", request_url="", emails="")[0]
+        self.assertEqual(call(app, path="/_access/sso/google")[0], "403 Forbidden")
+
+    def test_unknown_app_address(self):
+        with mock.patch.dict(os.environ, {"RAILWAY_PUBLIC_DOMAIN": ""}):
+            app = self.make()
+            status, _, _, log = call(app, path="/_access/sso/google", headers={"HTTP_HOST": "evil.example"})
+            self.assertEqual(status, "500 Internal Server Error")
+            self.assertIn("PUBLIC_URL", log)
+            status, headers, _, _ = call(app, path="/_access/sso/google", headers={"HTTP_HOST": "localhost:8080"})
+        self.assertEqual(status, "302 Found")
+        self.assertIn("redirect_uri=http%3A%2F%2Flocalhost%3A8080%2F_access%2Fsso%2Fcallback", headers["Location"])
+
+    def test_asgi(self):
+        app = quiet(MagicLinkASGI, secret_asgi, tokens="", request_url="", emails=self.EMAILS, secret="test-secret")[0]
+        status, headers, body, _, _ = asgi_call(app)
+        self.assertIn('href="/_access/sso/google"', body)
+        status, headers, _, _, _ = asgi_call(app, path="/_access/sso/google")
+        query = dict(parse_qsl(urlsplit(headers["location"]).query))
+        self.provider.claims = self.google(query["nonce"])
+        status, headers, _, _, log = asgi_call(app, path="/_access/sso/callback",
+                                               query=urlencode({"code": "c", "state": query["state"]}),
+                                               cookie=headers["set-cookie"].split(";")[0])
+        self.assertEqual((status, headers["location"]), (302, "/"))
+        self.assertEqual(events(log)[0]["user"], "ivan@company.com")
+        self.assertEqual(asgi_call(app, cookie=headers["set-cookie"].split(";")[0])[2], "secret page")
+
+
+class IdentityTest(unittest.TestCase):
+    """_identity on its own: which ID tokens give an address."""
+
+    GOOGLE = {"id": "google", "client_id": "g"}
+    MICROSOFT = {"id": "microsoft", "client_id": "m", "tenant": TENANT}
+
+    def claims(self, **extra):
+        base = {"aud": "g", "exp": 2000, "iat": 1000, "nonce": "n", "iss": "accounts.google.com",
+                "email": " Ivan@Company.COM ", "email_verified": "true", "hd": "company.com"}
+        return {k: v for k, v in dict(base, **extra).items() if v is not None}
+
+    def test_google(self):
+        self.assertEqual(magic_link._identity(self.GOOGLE, self.claims(), "n", now=1500), "ivan@company.com")
+        # The clock may be off by a few minutes either way.
+        self.assertEqual(magic_link._identity(self.GOOGLE, self.claims(exp=1500 - 200), "n", now=1500), "ivan@company.com")
+        with self.assertRaises(magic_link.SsoError) as caught:
+            magic_link._identity(self.GOOGLE, self.claims(hd=None), "n", now=1500)
+        self.assertEqual((caught.exception.unverified, caught.exception.email), (True, "ivan@company.com"))
+        with self.assertRaises(magic_link.SsoError) as caught:
+            magic_link._identity(self.GOOGLE, self.claims(exp=1500 - 400), "n", now=1500)
+        self.assertFalse(caught.exception.unverified)
+
+    def test_microsoft(self):
+        claims = {"aud": "m", "exp": 2000, "nonce": "n", "iss": "https://login.microsoftonline.com/%s/v2.0" % TENANT,
+                  "tid": TENANT, "preferred_username": "Ivan@Company.com", "email": "boss@company.com"}
+        # The sign-in name (UPN), not the mutable email claim.
+        self.assertEqual(magic_link._identity(self.MICROSOFT, claims, "n", now=1500), "ivan@company.com")
+        for bad in ({"preferred_username": None}, {"preferred_username": "+15551234567"}, {"tid": None}):
+            with self.assertRaises(magic_link.SsoError, msg=bad):
+                magic_link._identity(self.MICROSOFT, {k: v for k, v in dict(claims, **bad).items() if v is not None},
+                                     "n", now=1500)
+
+
+class StoreTest(EmailLoginBase):
+    """ACCESS_DB: sign-in state in SQLite survives a restart and is shared between worker processes."""
+
+    def setUp(self):
+        super().setUp()
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.db = os.path.join(folder, "state", "access.db")
+        env = mock.patch.dict(os.environ, {"ACCESS_DB": self.db, "SESSIONS_REVOKED": ""})
+        env.start()
+        self.addCleanup(env.stop)
+        self.app = self.make()
+
+    def make(self, emails=None, secret="test-secret"):
+        app, log = quiet(super().make, emails, secret)
+        self.addCleanup(lambda: app.gate.store.db.close() if app.gate.store.persistent else None)
+        return app
+
+    def test_a_used_link_stays_used_after_a_restart(self):
+        self.ask("ivan@company.com")
+        token = self.token_of(self.wait_mail()[1])
+        self.assertEqual(self.confirm(token)[0], "302 Found")
+        restarted = self.make()  # the same file: a restart, or another worker process
+        self.assertTrue(restarted.gate.store.persistent)
+        self.assertEqual(self.confirm(token, restarted)[0], "403 Forbidden")
+        self.assertTrue(os.path.isfile(self.db))
+
+    def test_a_link_is_spent_once_across_workers(self):
+        self.ask("ivan@company.com")
+        token = self.token_of(self.wait_mail()[1])
+        workers = [self.make() for _ in range(4)]
+        barrier, results = threading.Barrier(4), []
+
+        def finish(app):
+            barrier.wait()
+            results.append(call_raw(app, "/_access/verify", method="POST", body=urlencode({"t": token}).encode(),
+                                    quiet_log=False)[0])
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            threads = [threading.Thread(target=finish, args=(app,)) for app in workers]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(sorted(results), ["302 Found", "403 Forbidden", "403 Forbidden", "403 Forbidden"])
+
+    def test_rate_limits_are_shared(self):
+        for i in range(3):
+            self.assertEqual(self.ask("ivan@company.com", ip="198.51.100.%d" % i)[0], "200 OK")
+        self.assertEqual(self.ask("ivan@company.com", app=self.make(), ip="198.51.100.9")[0], "429 Too Many Requests")
+
+    def test_sign_out_on_all_devices(self):
+        laptop, phone = self.login(), self.login()
+        olga = self.login("olga@team.com")
+        status, headers, body, _ = call(self.app, path="/_access/logout", cookie=laptop)
+        self.assertEqual(status, "200 OK")
+        self.assertIn("Max-Age=0", headers["Set-Cookie"])
+        self.assertIn("Выйти на всех устройствах", body)
+        token = re.search(r'name="t" value="([^"]+)"', body).group(1)
+        self.assertEqual(call(self.app, cookie=phone)[0], "200 OK")  # an ordinary sign-out ends one browser only
+
+        status, _, body, log = call(self.app, path="/_access/logout", method="POST",
+                                    body=urlencode({"t": token}).encode())
+        self.assertIn("Вы вышли на всех устройствах", body)
+        self.assertIn("ivan@company.com", body)
+        self.assertEqual(events(log)[0]["magic_link"], "sign_out_all")
+        restarted = self.make()
+        for app in (self.app, restarted):
+            self.assertEqual(call(app, cookie=phone)[0], "403 Forbidden")
+            self.assertEqual(call(app, cookie=olga)[0], "200 OK")
+        self.assertEqual(call(restarted, cookie=self.login())[0], "200 OK")  # signing in again works
+
+    def test_sign_out_everywhere_needs_a_genuine_token(self):
+        cookie = self.login()
+        for bad in ("", "forged", self.token_of(self.app.gate.login_link("https://x/", "ivan@company.com"))):
+            status, _, body, _ = call(self.app, path="/_access/logout", method="POST", body=urlencode({"t": bad}).encode())
+            self.assertIn("Вы вышли", body)
+            self.assertNotIn("на всех устройствах</h1>", body)
+        self.assertEqual(call(self.app, cookie=cookie)[0], "200 OK")
+        # Not signed in, or signed in by link: no button.
+        self.assertNotIn("Выйти на всех устройствах", call(self.app, path="/_access/logout")[2])
+        link_cookie = "%s=%s" % (COOKIE_NAME, _cookie_value("owner-token"))
+        self.assertNotIn("Выйти на всех устройствах", call(self.app, path="/_access/logout", cookie=link_cookie)[2])
+
+    def test_no_button_when_the_state_is_in_memory(self):
+        with mock.patch.dict(os.environ, {"ACCESS_DB": ""}):
+            app = self.make()
+        self.assertFalse(app.gate.store.persistent)
+        cookie = self.login(app=app)
+        self.assertNotIn("Выйти на всех устройствах", call(app, path="/_access/logout", cookie=cookie)[2])
+
+    def test_volume_and_broken_paths(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        with mock.patch.dict(os.environ, {"ACCESS_DB": "", "RAILWAY_VOLUME_MOUNT_PATH": folder}):
+            app, log = quiet(MagicLink, secret_app, emails="ivan@company.com", secret="s")
+            app.gate.store.db.close()
+        self.assertEqual(app.gate.store.path, os.path.join(folder, ".magic-link.db"))
+        self.assertIn("состояние входа хранится в", log)
+        with mock.patch.dict(os.environ, {"ACCESS_DB": folder}):  # a folder, not a file: falls back to memory
+            app, log = quiet(MagicLink, secret_app, emails="ivan@company.com", secret="s")
+        self.assertFalse(app.gate.store.persistent)
+        self.assertIn("состояние входа хранится в памяти", log)
+        with mock.patch.dict(os.environ, {"ACCESS_DB": "memory", "RAILWAY_VOLUME_MOUNT_PATH": folder}):
+            self.assertFalse(quiet(MagicLink, secret_app, emails="x@y.com", secret="s")[0].gate.store.persistent)
+
+
+class RevokedSessionsTest(EmailLoginBase):
+    """SESSIONS_REVOKED: the owner signs people out (small access signout), also from a restored address."""
+
+    def test_parse(self):
+        self.assertEqual(magic_link.parse_revoked(" Ivan@Company.com=100, @team.com=5, *=7, junk=1, x@y.com=abc, ,"
+                                                  "ivan@company.com=50"),
+                         {"ivan@company.com": 100, "@team.com": 5, "*": 7})
+
+    def revoke(self, value):
+        with mock.patch.dict(os.environ, {"SESSIONS_REVOKED": value}):
+            return self.make()
+
+    def test_address_domain_and_everyone(self):
+        ivan, olga = self.login(), self.login("olga@team.com")
+        later = int(time.time()) + 5
+        cases = (("ivan@company.com=%d" % later, 403, 200), ("@team.com=%d" % later, 200, 403),
+                 ("*=%d" % later, 403, 403), ("ivan@company.com=%d" % (later - 3600), 200, 200), ("", 200, 200))
+        for value, ivan_status, olga_status in cases:
+            app = self.revoke(value)
+            self.assertEqual((call(app, cookie=ivan)[0][:3], call(app, cookie=olga)[0][:3]),
+                             (str(ivan_status), str(olga_status)), value)
+        # Invitation-link cookies are revoked with their token, not here.
+        owner = "%s=%s" % (COOKIE_NAME, _cookie_value("owner-token"))
+        self.assertEqual(call(self.revoke("*=%d" % later), cookie=owner)[0], "200 OK")
+
+    def test_new_sign_ins_work_after_the_cutoff(self):
+        with mock.patch("magic_link.time.time", return_value=time.time() - 60):
+            old = self.login()
+        app = self.revoke("ivan@company.com=%d" % (int(time.time()) - 30))
+        self.assertEqual(call(app, cookie=old)[0], "403 Forbidden")
+        self.assertEqual(call(app, cookie=self.login(app=app))[0], "200 OK")
+
+    def test_sessions_from_before_0_8_without_an_issue_time(self):
+        gate = self.app.gate
+        now = int(time.time())
+        legacy = "%s=e.%s" % (COOKIE_NAME, gate.sign("session", {"e": "ivan@company.com", "x": now + gate.max_age - 100}))
+        self.assertEqual(call(self.app, cookie=legacy)[0], "200 OK")
+        self.assertEqual(call(self.revoke("ivan@company.com=%d" % (now - 50)), cookie=legacy)[0], "403 Forbidden")
+        self.assertEqual(call(self.revoke("ivan@company.com=%d" % (now - 200)), cookie=legacy)[0], "200 OK")
+
+
+class GateSsoTest(SsoBase):
+    """MagicLinkGate (Streamlit): single sign-on and signing out everywhere without middleware."""
+
+    HEADERS = {"X-Forwarded-For": "203.0.113.9", "Host": "evil.example", "User-Agent": "Safari", "X-Forwarded-Proto": "https"}
+
+    def make(self, emails=None):
+        return quiet(MagicLinkGate, tokens="", request_url="", emails=emails or self.EMAILS, secret="test-secret")[0]
+
+    def test_links_and_finish(self):
+        self.assertEqual((self.app.sso, self.app.email_form), (("google", "microsoft"), False))
+        links, name, value = self.app.sso_links(self.HEADERS)
+        cookie = {name: value, "small_access_sso": "forged"}
+        self.assertTrue(name.startswith("small_access_sso_"), name)
+        self.assertNotEqual(self.app.sso_links(self.HEADERS)[1], name)  # another tab gets its own cookie
+        google = dict(parse_qsl(urlsplit(links["google"]).query))
+        microsoft = dict(parse_qsl(urlsplit(links["microsoft"]).query))
+        self.assertEqual(google["redirect_uri"], "https://reports.up.railway.app/")  # the Streamlit page itself
+        # One cookie serves both buttons; each provider gets its own state, nonce and verifier.
+        self.assertEqual(google["state"].split(".")[1], microsoft["state"].split(".")[1])
+        self.assertNotEqual(google["nonce"], microsoft["nonce"])
+        self.assertTrue(self.app.is_sso_return({"state": google["state"], "code": "c"}))
+        for other in ({"state": "abc"}, {"state": "google."}, {}, None, {"t": "x"}):
+            self.assertFalse(self.app.is_sso_return(other), other)
+
+        self.provider.claims = self.microsoft(microsoft["nonce"])
+        (kind, session, email), log = quiet(self.app.sso_finish, {"code": "c", "state": microsoft["state"]}, cookie,
+                                            self.HEADERS)
+        self.assertEqual((kind, email), ("session", "ivan@company.com"))
+        self.assertEqual(self.app.session_owner(session), "ivan@company.com")
+        self.assertEqual(events(log)[0]["ua"], "Safari")
+        self.assertEqual(self.provider.requests[0][1]["redirect_uri"], "https://reports.up.railway.app/")
+
+        self.provider.claims = self.google(google["nonce"], email="stranger@evil.example", hd="evil.example")
+        (kind, session, email), _ = quiet(self.app.sso_finish, {"code": "c", "state": google["state"]}, cookie,
+                                          self.HEADERS)
+        self.assertEqual((kind, session, email), ("denied", None, "stranger@evil.example"))
+        for cookies in ({name: "forged"}, {}, None, {"small_access_sso": value}):
+            self.assertEqual(quiet(self.app.sso_finish, {"code": "c", "state": google["state"]}, cookies,
+                                   self.HEADERS)[0], ("sso_failed", None, ""), cookies)
+
+    def test_without_sign_on(self):
+        with mock.patch.dict(os.environ, {"GOOGLE_CLIENT_ID": "", "MICROSOFT_CLIENT_ID": ""}):
+            gate = self.make()
+        self.assertIsNone(gate.sso_links(self.HEADERS))
+        self.assertTrue(gate.email_form)
+        with mock.patch.dict(os.environ, {"RAILWAY_PUBLIC_DOMAIN": ""}):
+            self.assertIsNone(self.app.sso_links(self.HEADERS))  # unknown address: no redirect URI to give
+
+    def test_sign_out_everywhere(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        with mock.patch.dict(os.environ, {"ACCESS_DB": os.path.join(folder, "a.db")}):
+            gate = self.make()
+        self.addCleanup(gate._gate.store.db.close)
+        self.assertTrue(gate.persistent)
+        links, name, value = gate.sso_links(self.HEADERS)
+        cookie = {name: value}
+        state = dict(parse_qsl(urlsplit(links["google"]).query))
+        self.provider.claims = self.google(state["nonce"])
+        session = quiet(gate.sso_finish, {"code": "c", "state": state["state"]}, cookie, self.HEADERS)[0][1]
+        token = gate.everywhere_token(session)
+        self.assertIsNone(gate.everywhere_token("e.forged"))
+        self.assertIsNone(self.app.everywhere_token(session))  # self.app keeps its state in memory
+        self.assertEqual(quiet(gate.sign_out_everywhere, token, self.HEADERS)[0], "ivan@company.com")
+        self.assertIsNone(gate.session_owner(session))
+        self.assertIsNone(quiet(gate.sign_out_everywhere, "forged")[0])
 
 
 def setUpModule():

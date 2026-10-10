@@ -18,6 +18,12 @@ NAME_RE = re.compile(r"[A-Za-z0-9_.@-]{1,40}\Z")
 EMAIL_RE = re.compile(r"[^@\s,;<>\"']+@[^@\s,;<>\"']+\.[^@\s,;<>\"']+\Z")
 DOMAIN_RE = re.compile(r"@[^@\s,;<>\"']+\.[^@\s,;<>\"']+\Z")
 MAIL_VARS = ("RESEND_API_KEY", "SMTP_URL", "LOGIN_LINKS_TO_LOG")
+# Single sign-on: a provider is on when all of its variables are set (small sso google / small sso microsoft).
+SSO_VARS = {"google": ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"),
+            "microsoft": ("MICROSOFT_CLIENT_ID", "MICROSOFT_CLIENT_SECRET", "MICROSOFT_TENANT_ID")}
+SSO_NAMES = {"google": "Google", "microsoft": "Microsoft"}
+SSO_CALLBACK = "/_access/sso/callback"
+SESSION_DAYS = 30  # how long a sign-in lasts in magic_link: older sign-out times can be forgotten
 
 
 def parse(value):
@@ -93,6 +99,75 @@ def pick(entries, name=None):
 def invite_link(domain, token):
     url = "https://%s/" % domain
     return url + "?token=" + quote(token, safe="") if token else url
+
+
+def sso_enabled(env):
+    """Single sign-on providers set up in the app's variables, in button order: ["google", "microsoft"] or fewer."""
+    return [provider for provider, names in SSO_VARS.items() if all(env.get(name) for name in names)]
+
+
+def is_streamlit(root):
+    app = root / "app.py"
+    return app.is_file() and "streamlit" in app.read_text(encoding="utf-8", errors="replace")
+
+
+def app_url(root, state):
+    """The app's public address: PUBLIC_URL from small.json (your own domain), else the Railway domain, else None."""
+    custom = load_config(root / CONFIG_FILE)["env"].get("PUBLIC_URL", "").strip().rstrip("/")
+    if custom:
+        return custom
+    return "https://" + state["domain"] if state.get("domain") else None
+
+
+def redirect_uri(root, state):
+    """Where Google and Microsoft send people back after sign-in: /_access/sso/callback, or the page itself for
+    Streamlit (it can't serve other paths). None until the app has an address."""
+    base = app_url(root, state)
+    if base is None:
+        return None
+    return base + "/" if is_streamlit(root) else base + SSO_CALLBACK
+
+
+def parse_revoked(value):
+    """SESSIONS_REVOKED "ivan@company.com=1760000000, *=1760000100" -> {"ivan@company.com": 1760000000, "*": ...}."""
+    found = {}
+    for item in (value or "").split(","):
+        who, _, moment = item.strip().lower().rpartition("=")
+        who = who.strip()
+        if (who == "*" or is_email(who)) and moment.strip().isdigit():
+            found[who] = max(found.get(who, 0), int(moment))
+    return found
+
+
+def add_revoked(value, who, now):
+    """SESSIONS_REVOKED with `who` (an address, @domain or *) signed out at `now`. Sign-outs older than a session's
+    lifetime are dropped: every session they could end has expired anyway."""
+    entries = parse_revoked(value)
+    entries[who.lower()] = int(now)
+    keep = sorted((w, t) for w, t in entries.items() if t > now - SESSION_DAYS * 24 * 3600)
+    return ", ".join("%s=%d" % pair for pair in keep)
+
+
+def feature_problem(root):
+    """None if the app's code knows sign-in with Google and Microsoft and signing out (small 0.8); otherwise what is
+    in the way and how to fix it."""
+    streamlit = is_streamlit(root)
+    if streamlit and "sso_finish" not in (root / "app.py").read_text(encoding="utf-8", errors="replace"):
+        return (tr("app.py is from a streamlit template older than small 0.8, without sign-in with Google and "
+                   "Microsoft. Take require_access() from the new app.py, and magic_link.py next to it: %s",
+                   "app.py — из шаблона streamlit старше small 0.8, без входа через Google и Microsoft. Возьмите "
+                   "require_access() из нового app.py и magic_link.py рядом с ним: %s") % (TEMPLATES_DIR / "streamlit"))
+    for name, template in (("magic_link.py", "streamlit" if streamlit else "python-http"),
+                           ("magic-link.js", "node-http")):
+        path = root / name
+        if path.is_file():
+            if "SESSIONS_REVOKED" in path.read_text(encoding="utf-8", errors="replace"):
+                return None
+            return (tr("%s in the app is older than small 0.8: it knows neither sign-in with Google and Microsoft nor "
+                       "signing out. Replace it with the new one: %s",
+                       "%s в приложении старше small 0.8: не знает ни входа через Google и Microsoft, ни выхода "
+                       "на всех устройствах. Замените его новым: %s") % (name, TEMPLATES_DIR / template / name))
+    return None  # no magic_link next to the code: the app may keep it elsewhere, as for email sign-in
 
 
 def email_login_problem(root):

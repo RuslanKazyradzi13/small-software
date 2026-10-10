@@ -5,19 +5,23 @@ if it isn't installed: pip install "streamlit>=1.40,<2".
 """
 
 import contextlib
+import html
 import importlib
 import importlib.util
 import io
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlsplit
 
 from small_cli import i18n
 from small_cli.config import load_config
@@ -51,7 +55,8 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
             "ACCESS_TOKEN": self.token, "ACCESS_EMAILS": EMAILS, "SESSION_SECRET": SECRET, "ACCESS_LANG": "",
             "ACCESS_REQUEST_URL": "", "RAILWAY_PUBLIC_DOMAIN": DOMAIN, "PUBLIC_URL": "", "OWNER_LANG": "en",
             "LOGIN_LINKS_TO_LOG": "", "RESEND_API_KEY": "", "SMTP_URL": "", "TELEGRAM_BOT_TOKEN": "",
-            "TELEGRAM_CHAT_ID": "",
+            "TELEGRAM_CHAT_ID": "", "GOOGLE_CLIENT_ID": "", "MICROSOFT_CLIENT_ID": "", "ACCESS_DB": "",
+            "RAILWAY_VOLUME_MOUNT_PATH": "", "SESSIONS_REVOKED": "",
         }
         self.cookies, self.headers, self.log, self.sent = {}, {}, "", []
         if HAS_STREAMLIT:
@@ -70,7 +75,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
                              "magic_link.py в шаблоне streamlit разошёлся с magic-link/magic_link.py")
         source = Path(self.app, "app.py").read_text(encoding="utf-8")
         compile(source, "app.py", "exec")
-        self.assertIn("from magic_link import MagicLinkGate", source)
+        self.assertRegex(source, r"from magic_link import [A-Za-z_, ]*\bMagicLinkGate\b")
         self.assertIn("require_access()", source)
 
     def test_deploy_uploads_magic_link(self):
@@ -289,7 +294,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         at = self.go(at.button[0].click())
         self.assert_app(at)
         self.assertNotIn("t", at.query_params)  # the link is removed from the URL
-        self.assertIn("[magic-link] signed in by email (ivan_petrov@team.com), ip=203.0.113.7", self.log)
+        self.assertIn('"[magic-link] signed in by email: ivan_petrov@team.com, ip 203.0.113.7"', self.log)
         [frame] = self.frames(at)
         cookie = re.search(r'"small_access=(e\.[A-Za-z0-9_.-]+); Path=/; Max-Age=2592000; SameSite=Lax"', frame)
         self.assertIsNotNone(cookie, frame)
@@ -374,7 +379,7 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         # As before: the token stays in the URL (AppTest returns a string, Streamlit 1.40 a list).
         self.assertIn(at.query_params["token"], (self.token, [self.token]))
         self.assertEqual((self.labels(at.sidebar.button), self.frames(at)), ([], []))  # no cookie and no "Sign out"
-        self.assertIn("[magic-link] signed in by link (bob), ip=203.0.113.7", self.log)
+        self.assertIn('"[magic-link] signed in by link: bob, ip 203.0.113.7"', self.log)
         self.assert_app(self.go(at))  # a rerun doesn't check again
         self.assertEqual(self.log.count("signed in by link"), 1)
 
@@ -421,6 +426,129 @@ class StreamlitTemplateTestEmail(unittest.TestCase):
         self.ask("olga@team.com")
         self.assertTrue(self.wait_mail()[1].startswith("https://reports.company.com/?t="))
 
+
+    # --- single sign-on and signing out everywhere ---
+
+    def google(self):
+        """Google token endpoint mock: answers the code exchange with an unsigned ID token made of self.claims (the
+        app trusts TLS to the token endpoint, as OpenID Connect allows). Turns sign-in with Google on."""
+        box = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                box.exchanges.append(dict(parse_qsl(self.rfile.read(int(self.headers["Content-Length"])).decode())))
+                encode = box.magic_link()._b64
+                token = "%s.%s.c2ln" % (encode(b'{"alg":"RS256"}'), encode(json.dumps(box.claims).encode()))
+                raw = json.dumps({"id_token": token}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.exchanges, self.claims = [], {}
+        self.environ.update(GOOGLE_CLIENT_ID="g-client", GOOGLE_CLIENT_SECRET="g-secret",
+                            GOOGLE_AUTH_URL="https://accounts.google.test/auth",
+                            GOOGLE_TOKEN_URL="http://127.0.0.1:%d/token" % server.server_address[1])
+
+    def sso_start(self, at):
+        """From the sign-in screen: (query of the Google link, {state cookie name: value} written by the frame)."""
+        [link] = [m.value for m in at.markdown if 'target="_self"' in m.value]
+        self.assertIn("Войти через Google", link)
+        url = html.unescape(re.search(r'href="([^"]+)"', link).group(1))
+        [frame] = self.frames(at)
+        found = re.search(r'"(small_access_sso_[A-Za-z0-9_-]+)=([A-Za-z0-9_.-]+); Path=/; Max-Age=600; SameSite=Lax"',
+                          frame)
+        self.assertIsNotNone(found, frame)
+        return dict(parse_qsl(urlsplit(url).query)), {found.group(1): found.group(2)}
+
+    def id_token(self, query, **claims):
+        now = int(time.time())
+        self.claims = dict({"iss": "https://accounts.google.com", "aud": "g-client", "exp": now + 600, "iat": now,
+                            "nonce": query["nonce"], "email": "ivan@company.com", "email_verified": True,
+                            "hd": "company.com"}, **claims)
+
+    @needs_streamlit
+    def test_sign_in_with_google(self):
+        self.google()
+        at = self.open()
+        self.assertIn("Вход рабочим аккаунтом", at.markdown[0].value)
+        self.assertEqual((self.labels(at.text_input), len(at.title)), ([], 0))  # email isn't set up: no form
+        query, state_cookie = self.sso_start(at)
+        self.assertEqual((query["client_id"], query["redirect_uri"]), ("g-client", "https://%s/" % DOMAIN))
+        again = self.go(at)  # a rerun keeps the same state: the same link, no new cookie
+        self.assertEqual(([m.value for m in again.markdown], self.frames(again)), ([m.value for m in at.markdown], []))
+
+        self.id_token(query)
+        self.cookies = state_cookie
+        self.headers = {"X-Forwarded-For": "203.0.113.7", "User-Agent": "Firefox"}
+        at = self.open(code="4/0Abc", state=query["state"])
+        self.assert_app(at)
+        self.assertEqual(dict(at.query_params), {})  # the code and the state are removed from the URL
+        self.assertEqual(self.exchanges[0]["redirect_uri"], "https://%s/" % DOMAIN)
+        self.assertIn('"[magic-link] signed in with Google: ivan@company.com, ip 203.0.113.7"', self.log)
+        cookie = re.search(r'"small_access=(e\.[A-Za-z0-9_.-]+); Path=/; Max-Age=2592000; SameSite=Lax"',
+                           self.frames(at)[0])
+        self.assertIsNotNone(cookie, self.frames(at))
+        self.cookies = {"small_access": cookie.group(1)}
+        self.assert_app(self.open())
+
+        # The same answer again, or from another browser (no state cookie): refused.
+        self.cookies = state_cookie
+        self.assertIn("Не удалось войти", self.open(code="4/0Abc", state=query["state"]).markdown[0].value)
+        self.cookies = {}
+        self.assertIn("Не удалось войти", self.open(code="4/0Abc", state=query["state"]).markdown[0].value)
+
+    @needs_streamlit
+    def test_google_account_without_access(self):
+        self.google()
+        self.environ["LOGIN_LINKS_TO_LOG"] = "1"  # email is set up too: both ways are offered
+        at = self.open()
+        self.assertEqual(self.labels(at.text_input), ["Рабочая почта"])
+        self.assertIn("или по ссылке на почту", [c.value for c in at.caption])
+        query, self.cookies = self.sso_start(at)
+        self.id_token(query, email="stranger@evil.example", hd="evil.example")
+        at = self.open(code="c", state=query["state"])
+        self.assertIn("Нет доступа", at.markdown[0].value)
+        self.assertIn("stranger", at.markdown[1].value)
+        self.assertEqual(len(at.title), 0)
+        self.assertIn("[access-request] contact='stranger@evil.example'", self.log)
+        self.assert_sign_in_screen(self.go(at.button[0].click()), "Вход рабочим аккаунтом")  # another account
+
+        query, self.cookies = self.sso_start(self.open())
+        self.id_token(query, hd=None)  # a personal Google account with a company address
+        self.assertIn("Нужен рабочий аккаунт", self.open(code="c", state=query["state"]).markdown[0].value)
+
+    @needs_streamlit
+    def test_sign_out_on_all_devices(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)  # on Windows the database may still be open: never mind
+        self.environ["ACCESS_DB"] = os.path.join(folder, "access.db")
+        session = self.session_value()
+        self.cookies = {"small_access": session}
+        at = self.open()
+        self.assert_app(at)
+        self.assertEqual(self.labels(at.sidebar.button), ["Выйти", "Выйти на всех устройствах"])
+        at = self.go(at.sidebar.button[1].click())
+        self.assertIn("Вы вышли на всех устройствах", at.markdown[0].value)
+        self.assertIn("ivan@company.com", at.markdown[1].value.replace("\\", ""))
+        self.assertIn('"small_access=; Path=/; Max-Age=0; SameSite=Lax"', self.frames(at)[0])
+        self.assertIn('"magic_link": "sign_out_all"', self.log)
+        self.assert_sign_in_screen(self.open())  # the same cookie in another browser no longer works
+        st = importlib.import_module("streamlit")
+        st.cache_resource.clear()  # a restart: the sign-out is kept in ACCESS_DB
+        self.assert_sign_in_screen(self.open())
+        self.cookies = {"small_access": self.session_value()}  # signing in again works
+        self.assert_app(self.open())
+
+        self.environ["ACCESS_DB"] = ""  # in memory a sign-out wouldn't survive a restart: no button
+        self.assertEqual(self.labels(self.open().sidebar.button), ["Выйти"])
 
 def setUpModule():
     i18n.use("ru")  # the checks read small's Russian text; the machine's and CI's language don't matter

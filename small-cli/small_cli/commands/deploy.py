@@ -100,9 +100,11 @@ def cmd_deploy(args):
         say(tr("Public domain: %s", "Публичный домен: %s") % state["domain"])
 
     variables = dict(config["env"])
-    if variables.get("ACCESS_EMAILS") and "PUBLIC_URL" not in variables:
-        # After a domain rename Railway keeps the old address in RAILWAY_PUBLIC_DOMAIN, so sign-in links
-        # would lead to a 404. That's why we pass the real address ourselves (only to Railway: the domain can change).
+    signs_in = any(variables.get(name) for name in ("ACCESS_EMAILS", "GOOGLE_CLIENT_ID", "MICROSOFT_CLIENT_ID"))
+    if signs_in and "PUBLIC_URL" not in variables:
+        # After a domain rename Railway keeps the old address in RAILWAY_PUBLIC_DOMAIN, so sign-in links and sign-on
+        # redirects would lead to a 404. That's why we pass the real address ourselves (only to Railway: the domain
+        # can change).
         variables["PUBLIC_URL"] = "https://" + state["domain"]
     if variables and "OWNER_LANG" not in variables:
         variables["OWNER_LANG"] = lang()  # log lines and Telegram notifications in the owner's language

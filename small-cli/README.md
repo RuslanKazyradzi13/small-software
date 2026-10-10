@@ -2,20 +2,23 @@
 
 [Русская версия](https://github.com/RuslanKazyradzi13/small-software/blob/main/small-cli/README.ru.md)
 
-`small` deploys small team apps to Railway in one command and protects them with sign-in by work email or
-personal invite links.
+`small` deploys small team apps to Railway in one command and protects them with sign-in by work account (Google,
+Microsoft), work email or personal invite links.
 
 ```
 small init my-service    # skeleton: invite-link protected server, small.json, .gitignore
 cd my-service
 small deploy             # → https://my-service-3f9a.up.railway.app
 small open               # open with the invite link
-small access add ivan@company.com   # sign-in by work email, like sharing a Google Doc
-small mail resend        # how sign-in emails are sent
+small access add ivan@company.com   # who may sign in, like sharing a Google Doc
+small sso google         # "Sign in with Google" (or small sso microsoft)
+small mail resend        # or sign-in links by email
+small access log         # who signed in, when and how
 small access add bob     # or a personal link for bob (small access revoke bob to revoke it)
 small notify telegram    # access requests to Telegram
 small env set DEBUG=1    # environment variable in Railway and small.json
 small db add postgres    # database, DATABASE_URL in the app
+small volume add         # persistent disk: files and sign-in state survive deploys
 small domain add app.example.com   # custom domain
 small sleep on           # sleep when idle (saves money)
 small logs -f            # app logs
@@ -313,18 +316,22 @@ These commands work in the folder of a deployed app, that is, where `.small.json
 small link [folder] [--as NAME]                       # print the invite link
 small open [folder] [--as NAME]                       # the same + open it in the browser
 small access [list | add EMAIL|@DOMAIN|NAME | revoke EMAIL|NAME]   # who can sign in
+small access log [-n N] [--json]                   # who signed in, when and how
+small access signout EMAIL|@DOMAIN|--all           # end their sessions on all devices
+small sso [google [--client-id ID] | microsoft [--client-id ID] [--tenant T] | off [PROVIDER]]
 small mail [resend | smtp [--from FROM] [--to TO] | log | off]  # emails for sign-in by email
 small notify [telegram [--chat-id ID] | off]        # access requests to Telegram
 small env [list [--values] | set K=V ... | unset K ...] [--no-deploy]
 small db [list | add postgres | remove postgres [--yes]]
+small volume [add [--mount /data]]                  # persistent disk; no argument shows the status
 small domain [list | add DOMAIN [--port N] | remove DOMAIN]
 small sleep [on | off]                              # sleep mode; no argument shows the status
 small logs [folder] [--build] [-n N] [-f]            # log of the latest deploy
 small destroy [folder] [--yes]                       # remove from Railway
 ```
 
-Commands that change the app's variables (`access add` / `revoke`, `mail`, `notify`, `env set` / `unset`,
-`db add` / `remove`) and `sleep on` / `off` restart the app once. Add `--no-deploy` to skip the restart; the change
+Commands that change the app's variables (`access add` / `revoke` / `signout`, `sso`, `mail`, `notify`,
+`env set` / `unset`, `db add` / `remove`), `volume add` and `sleep on` / `off` restart the app once. Add `--no-deploy` to skip the restart; the change
 then takes effect on the next deploy.
 
 **`small link` / `small open`** build `https://<domain>/?token=<token>`.
@@ -337,15 +344,22 @@ then takes effect on the next deploy.
 
 **`small access`** controls who can open the app. There are two ways, and you can combine them.
 
-*By work email*, like sharing a Google Doc. This is the recommended way:
-- **`add ivan@company.com`** adds the address to `ACCESS_EMAILS`. Ivan opens the app, enters his email and gets a
-  message with a sign-in link: it works for 15 minutes and only once, and the browser remembers the sign-in for
-  30 days. Only someone who reads that mailbox can sign in, so passing the link on to someone else gives them
-  nothing.
+*By address*, like sharing a Google Doc. This is the recommended way:
+- **`add ivan@company.com`** adds the address to `ACCESS_EMAILS`. Ivan opens the app and proves the address is his:
+  with **Sign in with Google / Microsoft** (`small sso`), or by entering it and getting a sign-in link by email
+  (`small mail`) that works for 15 minutes and only once. The browser remembers the sign-in for 30 days. Passing a
+  link on gives nobody anything: only the owner of the mailbox or account gets in.
 - **`add @company.com`** lets in everyone with an address in that domain.
-- **`revoke ivan@company.com`** closes sign-in right after the restart, even in a browser that is already open.
-- The first `add` creates `SESSION_SECRET`, the key that signs links and sessions. Email sending must be set up:
-  `small mail`.
+- **`revoke ivan@company.com`** closes sign-in right after the restart, even in a browser that is already open. The
+  time also goes to `SESSIONS_REVOKED`, so if you add the address back later, the old sessions stay invalid.
+- **`signout ivan@company.com`** (or `@company.com`, or `--all`) ends the sessions on every device without taking
+  access away: for a lost laptop. People can do it themselves with **Sign out on all devices** if the app has a
+  volume (`small volume add`).
+- **`log`** prints who signed in, when, how (Google, Microsoft, email link, invite link) and from which IP, plus
+  refused sign-ins and access requests, across deploys: `magic_link` writes them as JSON log lines, and Railway
+  keeps them as long as your plan keeps logs. `--json` gives one object per line.
+- The first `add` creates `SESSION_SECRET`, the key that signs links and sessions. One way to sign in must be set up:
+  `small sso` or `small mail`.
 - `small` passes the address for links in emails to the app itself, in `PUBLIC_URL` (in Railway only): after the
   domain is renamed to `<name>.up.railway.app`, Railway keeps the old address in `RAILWAY_PUBLIC_DOMAIN`, and the
   links would lead to a 404. If you want links on your own domain, set `PUBLIC_URL` in `small.json`; `small` does
@@ -362,10 +376,26 @@ then takes effect on the next deploy.
   their access.
 
 - **`list`** shows who has access: addresses and names (tokens are hidden).
-- **Sign-in log.** Sign-ins show up in the log: `small logs | Select-String "signed in by"` (PowerShell; on
-  macOS/Linux use `grep`) → `signed in by email (ivan@company.com)` or `signed in by link (bob)`. With
-  `OWNER_LANG=ru` these lines are in Russian; search them with `Select-String`, not `findstr`, which reads the
-  argument and the text in different encodings and does not find Cyrillic.
+- **Sign-in log.** `small access log` (above). In the raw log (`small logs`) each sign-in is one JSON line, for
+  example `{"message": "[magic-link] signed in with Google: ivan@company.com, ip 203.0.113.7", "magic_link":
+  "sign_in", "method": "google", ...}`; Railway's log explorer filters them with `@magic_link:sign_in`.
+
+**`small sso`** sets up sign-in with a work account. Who may sign in is still the access list.
+- **`google`**: "Sign in with Google" for Google Workspace accounts and Gmail addresses. `small` prints what to do
+  in Google Cloud (about 5 minutes: an OAuth client of type Web application) and the exact redirect URI to register,
+  then asks for the client ID and secret (the secret from `GOOGLE_CLIENT_SECRET` or with hidden input).
+- **`microsoft`**: "Sign in with Microsoft" for the members of one Microsoft Entra organization. `small` prints the
+  steps (an app registration, single tenant, a client secret) and the redirect URI; `--tenant` takes the Directory
+  (tenant) ID or your domain (`company.com`), which `small` resolves to the ID.
+- **Checked before saving.** `small` shows the provider the client ID and secret; a wrong pair is refused and
+  nothing is saved.
+- **Which accounts count.** Google: verified Gmail addresses, or accounts of a Google Workspace organization; a
+  personal Google account registered with a company address is refused. Microsoft: members of your tenant only, not
+  guests and not other organizations. Details: [SECURITY.md](https://github.com/RuslanKazyradzi13/small-software/blob/main/SECURITY.md#threat-model).
+- **Redirect URI**: `https://<app>/_access/sso/callback`, or `https://<app>/` for `streamlit`. With your own domain,
+  set `PUBLIC_URL` in `small.json` first, and register that address.
+- If email sign-in isn't set up, the sign-in page shows only the provider buttons; with both, it shows both.
+- **`off [google|microsoft]`** turns one or both off; with no subcommand you get the status and the redirect URI.
 
 **`small mail`** sets how the app sends sign-in emails.
 - **`resend`** sends through [Resend](https://resend.com) over HTTPS. `small` takes the key from `RESEND_API_KEY`
@@ -415,6 +445,16 @@ then takes effect on the next deploy.
 - **`list`** shows the domains and their state (waiting for DNS records / DNS configured) and the certificate
   status.
 - **`remove`** removes the domain.
+
+**`small volume`** gives the app a persistent disk (a Railway volume).
+- **`add`** creates one at `/data` (`--mount` for another path, outside `/app`) and restarts the app. The app can
+  keep files there; the path is in `RAILWAY_VOLUME_MOUNT_PATH`. With no subcommand you get the path and how much is
+  used.
+- **Sign-in state.** `magic_link` keeps it in `.magic-link.db` (SQLite) on the volume: used sign-in links stay used
+  after a restart, rate limits are shared by worker processes, and **Sign out on all devices** appears. Without a
+  volume this state lives in memory and a restart forgets it.
+- **Trade-off.** With a volume each deploy has a few seconds of downtime: two copies of the app can't share the disk.
+  A service has one volume.
 
 **`small sleep`** controls Railway's sleep mode (serverless).
 - **`on`**: with no incoming requests the app goes to sleep and uses no CPU or memory; the first request wakes it
@@ -538,8 +578,9 @@ The tests start a local mock of the Railway API (GraphQL + the upload endpoint) 
 deploy, repeat deploy, failed build, crash, taken domain, several workspaces, wrong token, ignore rules.
 
 Template tests on real frameworks are skipped if the framework is not installed; the rest pass.
-- `streamlit` tests: the access gate through `streamlit.testing.v1.AppTest` (personal tokens and sign-in by email:
-  form, one-time link, session cookie, revocation, sign out) and the server through `python app.py`.
+- `streamlit` tests: the access gate through `streamlit.testing.v1.AppTest` (personal tokens, sign-in by email:
+  form, one-time link, session cookie, revocation, sign out; sign-in with Google against a local provider, refusals,
+  sign out on all devices) and the server through `python app.py`.
 - 2 `fastapi` tests: `TestClient` and `uvicorn main:app` the way Railway runs it, plus a check that the token is
   hidden in the access log.
 
@@ -553,6 +594,11 @@ Template tests on real frameworks are skipped if the framework is not installed;
 Dashboard buttons: the "Open via invite link" redirect and its protection against foreign paths, "Logs" without a
 token, with Railway and with Railway unavailable. Sleep mode and the cost estimate in the dashboard, Railway errors
 while computing the cost.
+
+`small sso`, `volume`, `access log` and `access signout` are tested against mocks of Railway, Google and Microsoft:
+the credential check, a wrong secret that saves nothing, resolving a domain to a tenant, the Streamlit and custom
+domain redirect URIs, old `magic_link` code, the volume and its mount path, the access log table, `--json` and the MCP
+tool, sign-outs by address, domain and `--all`, forgetting old sign-outs.
 
 `small sleep`, `db`, `domain` and `notify` are tested against mocks of Railway and the Telegram Bot API:
 - turning sleep on and off, turning it on again without requests, `--no-deploy`;

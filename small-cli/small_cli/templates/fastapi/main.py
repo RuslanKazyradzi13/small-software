@@ -22,12 +22,12 @@ app.add_middleware(MagicLinkASGI)
 
 
 class HideToken(logging.Filter):
-    """uvicorn writes the full URL to its access log: hide ?token=... and ?t=... (sign-in link) so they never reach
-    the Railway logs."""
+    """uvicorn writes the full URL to its access log: hide ?token=..., ?t=... (sign-in link) and the sign-on
+    ?code=...&state=... so they never reach the Railway logs."""
 
     def filter(self, record):
         if isinstance(record.args, tuple):
-            record.args = tuple(re.sub(r"\b(token|t)=[^&\s]*", r"\1=***", a) if isinstance(a, str) else a
+            record.args = tuple(re.sub(r"\b(token|t|code|state)=[^&\s]*", r"\1=***", a) if isinstance(a, str) else a
                                 for a in record.args)
         return True
 

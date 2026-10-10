@@ -536,12 +536,16 @@ def _page_texts():
                         "Ссылка появится после small deploy: small link --as {who}"),
         "copy": tr("Copy", "Копировать"),
         "copied": tr("Copied", "Скопировано"),
-        "emailHow": tr("How to sign in: open {url} and enter the work email. An email with a sign-in link will arrive.",
-                       "Как войти: открыть {url} и ввести рабочую почту — придёт письмо со ссылкой для входа."),
+        "emailHow": tr("How to sign in: open {url} and sign in with this work address (with Google or Microsoft, "
+                       "or with a link sent by email).",
+                       "Как войти: открыть {url} и войти с этим рабочим адресом (через Google или Microsoft либо "
+                       "по ссылке из письма)."),
         "noUrl": tr("the app URL (after small deploy)", "адрес приложения (после small deploy)"),
-        "mailOff": tr("Email is not set up, so sign-in emails are not sent. Set it up in the terminal: "
-                      "small mail resend",
-                      "Почта не настроена, письма для входа не уходят. Подключить в терминале: small mail resend"),
+        "mailOff": tr("Nobody on the list can sign in yet: neither sign-in emails nor Google or Microsoft are set "
+                      "up. Set up one in the terminal: small sso google, small sso microsoft or small mail resend",
+                      "Войти из списка пока никто не может: не настроены ни письма для входа, ни Google или "
+                      "Microsoft. Настройте что-то одно в терминале: small sso google, small sso microsoft или "
+                      "small mail resend"),
         "revoked": tr("Access revoked: {who}", "Доступ отозван: {who}"),
         "restarting": tr("Railway is restarting the app: the change takes effect in a minute or two.",
                          "Railway перезапускает приложение — изменение вступит в силу через минуту-другую."),

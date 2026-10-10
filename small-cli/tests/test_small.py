@@ -1026,7 +1026,7 @@ class StreamlitTemplateTest(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             at = self.app_test(token=self.token, env={"ACCESS_TOKEN": "owner-tok,bob:" + self.token})
         self.assertEqual(at.title[0].value, "🚀 small + Streamlit")
-        self.assertIn("signed in by link (bob)", out.getvalue())
+        self.assertIn('"[magic-link] signed in by link: bob, ip', out.getvalue())
         revoked = self.app_test(token=self.token, env={"ACCESS_TOKEN": "owner-tok"})  # bob is revoked
         self.assertIn("Ссылка недействительна", revoked.markdown[0].value)
 
@@ -1038,8 +1038,10 @@ class StreamlitTemplateTest(unittest.TestCase):
         with contextlib.redirect_stdout(out), mock.patch.dict(os.environ, {"ACCESS_TOKEN": self.token}):
             at.button[0].click().run()
         self.assertIn("Запрос отправлен", at.success[0].value)
-        self.assertIn("[access-request] contact='me@example.com\\n[access-request] fake'", out.getvalue())
         self.assertEqual(out.getvalue().count("\n"), 1)  # one log line, the line break is escaped
+        event = json.loads(out.getvalue())
+        self.assertIn("[access-request] contact='me@example.com\\n[access-request] fake'", event["message"])
+        self.assertEqual(event["user"], "me@example.com\n[access-request] fake")
 
     @unittest.skipUnless(HAS_STREAMLIT, "streamlit не установлен")
     def test_python_app_py_starts_streamlit_server(self):
@@ -1647,7 +1649,7 @@ class FastAPITemplateTest(unittest.TestCase):
             self.assertIn("small + FastAPI", page.text)
             self.assertEqual(client.get("/api/hello", params={"name": "bob"}).json()["message"], "Hello, bob!")
             self.assertEqual(client.get("/docs").status_code, 200)
-        self.assertIn("signed in by link (bob)", log.getvalue())
+        self.assertIn('"[magic-link] signed in by link: bob, ip testclient"', log.getvalue())
 
     @unittest.skipUnless(HAS_FASTAPI, "fastapi/uvicorn/httpx не установлены")
     def test_uvicorn_like_railway_and_token_hidden_in_access_log(self):

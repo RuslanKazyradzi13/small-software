@@ -28,7 +28,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - uses: actions/setup-node@v7  # for the node-http template test
         with:
-          node-version: "20"
+          node-version: "22"
       - name: Tests (without Streamlit and FastAPI, so their tests are skipped)
         working-directory: small-cli
         run: python -m unittest discover -s tests -v
@@ -171,8 +171,12 @@ jobs:
           if (Test-Path $env:SMALL_INSTALL_DIR) { throw "$env:SMALL_INSTALL_DIR still exists" }
 
   magic-link:
-    name: magic-link · Python + Node.js
+    name: magic-link · Python + Node.js ${{ matrix.node }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]  # 22.13+ and 24 have node:sqlite, so the SQLite store is tested too
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -180,7 +184,7 @@ jobs:
           python-version: "3.12"
       - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: ${{ matrix.node }}
       - name: Python (WSGI)
         working-directory: magic-link
         run: python -m unittest test_magic_link -v

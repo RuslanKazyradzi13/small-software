@@ -67,7 +67,7 @@ class ProtocolTest(McpBase):
         tools = self.request("tools/list")[0]["result"]["tools"]
         names = [t["name"] for t in tools]
         self.assertEqual(names, ["init_app", "deploy_app", "share_app", "revoke_access", "list_access",
-                                 "list_apps", "app_logs", "set_env"])
+                                 "access_log", "list_apps", "app_logs", "set_env"])
         self.assertFalse([n for n in names if "destroy" in n or "delete" in n])  # deleting is terminal-only
         for tool in tools:
             self.assertEqual(tool["inputSchema"]["type"], "object")

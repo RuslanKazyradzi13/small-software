@@ -27,9 +27,11 @@ PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 INSTRUCTIONS = (
     "small deploys small team apps to Railway and keeps them private: only people you share an app with can open "
     "it. Typical flow: init_app (or use an existing app folder) -> deploy_app -> share_app with a work email. "
-    "Always pass absolute folder paths. Prefer sharing by email: the person signs in with a one-time link sent to "
-    "that address, so nothing secret passes through the chat. A name instead of an email creates a personal link "
-    "that works like a password. Deleting apps is not available here; the user runs `small destroy` in a terminal."
+    "Always pass absolute folder paths. Prefer sharing by email: the person signs in with Google or Microsoft (if "
+    "the user set it up with `small sso`) or with a one-time link sent to that address, so nothing secret passes "
+    "through the chat. A name instead of an email creates a personal link that works like a password. Deleting apps "
+    "and entering provider secrets are not available here; the user runs `small destroy` and `small sso` in a "
+    "terminal."
 )
 
 PATH = {"type": "string", "description": "Absolute path to the app folder."}
@@ -70,11 +72,12 @@ TOOLS = [
     {
         "name": "share_app",
         "title": "Share an app",
-        "description": "Give someone access to a deployed app. With an email or @domain the person opens the app, "
-                       "enters that email and signs in with a one-time link (sign-in emails need email delivery "
-                       "set up once with `small mail` in a terminal; the result warns when it is missing). With a "
-                       "name, returns a personal invite link that works like a password: show it to the user only "
-                       "and suggest sending it privately. The app restarts to apply the change.",
+        "description": "Give someone access to a deployed app. With an email or @domain the person opens the app "
+                       "and signs in with Google or Microsoft (set up once with `small sso` in a terminal) or with "
+                       "a one-time link emailed to them (set up once with `small mail`); the result warns when "
+                       "neither is set up. With a name, returns a personal invite link that works like a password: "
+                       "show it to the user only and suggest sending it privately. The app restarts to apply the "
+                       "change.",
         "inputSchema": {"type": "object", "properties": {"path": PATH, "who": WHO}, "required": ["path", "who"]},
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,
                         "openWorldHint": True},
@@ -93,6 +96,18 @@ TOOLS = [
         "title": "Who has access",
         "description": "List the emails, domains and personal-link names that can open an app.",
         "inputSchema": {"type": "object", "properties": {"path": PATH}, "required": ["path"]},
+        "annotations": {"readOnlyHint": True, "openWorldHint": True},
+    },
+    {
+        "name": "access_log",
+        "title": "Who signed in",
+        "description": "The app's sign-in log across deploys, oldest first, one JSON object per line: time, event "
+                       "(sign_in, denied, sign_out_all, request), method (email, link, google, microsoft), user, "
+                       "ip. Railway keeps logs for a limited time depending on the plan.",
+        "inputSchema": {"type": "object", "properties": {
+            "path": PATH,
+            "lines": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "How many entries (default 50)."},
+        }, "required": ["path"]},
         "annotations": {"readOnlyHint": True, "openWorldHint": True},
     },
     {
@@ -260,10 +275,19 @@ def _list_access(args, progress):
 
 
 def _logs(args, progress):
-    lines = args.get("lines", 100)
+    lines = _lines(args, 100)
+    return run_cli(["logs", _path(args), "-n", str(lines)] + (["--build"] if args.get("build") else []), progress)
+
+
+def _access_log(args, progress):
+    return run_cli(["access", "log", "-C", _path(args), "--json", "-n", str(_lines(args, 50))], progress)
+
+
+def _lines(args, default):
+    lines = args.get("lines", default)
     if not isinstance(lines, int) or isinstance(lines, bool) or not 1 <= lines <= 1000:
         raise ToolError(tr("lines must be a number from 1 to 1000", "lines — число от 1 до 1000"))
-    return run_cli(["logs", _path(args), "-n", str(lines)] + (["--build"] if args.get("build") else []), progress)
+    return lines
 
 
 def _set_env(args, progress):
@@ -301,7 +325,8 @@ def _list_apps(args, progress):
 
 
 HANDLERS = {"init_app": _init, "deploy_app": _deploy, "share_app": _share, "revoke_access": _revoke,
-            "list_access": _list_access, "list_apps": _list_apps, "app_logs": _logs, "set_env": _set_env}
+            "list_access": _list_access, "access_log": _access_log, "list_apps": _list_apps, "app_logs": _logs,
+            "set_env": _set_env}
 
 
 def run_cli(argv, progress=None):

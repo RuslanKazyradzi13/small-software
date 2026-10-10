@@ -305,6 +305,47 @@ class Railway:
     def logs(self, deployment_id, build=True, limit=40):
         return [entry["message"] for entry in self.log_entries(deployment_id, build=build, limit=limit)]
 
+    def environment_logs(self, environment_id, query, limit=100):
+        """The latest log lines of the whole environment, across all deploys, oldest first, that match a Railway log
+        query such as "@service:<id> @magic_link:*". Attributes of JSON log lines come as {key: value}, with the
+        values decoded (Railway sends them JSON-encoded)."""
+        data = self.graphql(
+            "query($e: String!, $f: String, $n: Int) { environmentLogs(environmentId: $e, filter: $f, beforeLimit: $n) "
+            "{ timestamp message severity attributes { key value } } }",
+            {"e": environment_id, "f": query, "n": limit},
+        )
+        entries = []
+        for entry in data["environmentLogs"] or []:
+            attributes = {}
+            for item in entry.get("attributes") or []:
+                try:
+                    attributes[item["key"]] = json.loads(item["value"])
+                except (TypeError, ValueError):
+                    attributes[item["key"]] = item["value"]
+            entries.append(dict(entry, attributes=attributes))
+        return entries
+
+    def service_volume(self, environment_id, service_id):
+        """The service's volume in the environment: {"id", "mountPath", "currentSizeMB", "sizeMB", "state"}, or None."""
+        data = self.graphql(
+            "query($id: String!) { environment(id: $id) { volumeInstances { edges { node "
+            "{ id mountPath serviceId currentSizeMB sizeMB state } } } } }",
+            {"id": environment_id},
+        )
+        for edge in data["environment"]["volumeInstances"]["edges"]:
+            if edge["node"].get("serviceId") == service_id:
+                return edge["node"]
+        return None
+
+    def create_volume(self, project_id, environment_id, service_id, mount_path):
+        """A volume for the service, mounted at mount_path when the service next starts."""
+        data = self.graphql(
+            "mutation($input: VolumeCreateInput!) { volumeCreate(input: $input) { id name } }",
+            {"input": {"projectId": project_id, "environmentId": environment_id, "serviceId": service_id,
+                       "mountPath": mount_path}},
+        )
+        return data["volumeCreate"]
+
     def service_variables(self, project_id, environment_id, service_id, unrendered=False):
         """Service variables. unrendered=True: as written, without resolving references: `${{Postgres.DATABASE_URL}}`
         rather than the final address with the password."""

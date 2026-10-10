@@ -37,8 +37,9 @@ class ThreadingServer(ThreadingMixIn, WSGIServer):
 
 class Handler(WSGIRequestHandler):
     def log_message(self, format, *args):
-        # Keep ?token=... (invite link) and ?t=... (sign-in link from an email) out of the logs.
-        super().log_message(format, *(re.sub(r"\b(token|t)=[^&\s]*", r"\1=***", str(a)) for a in args))
+        # Keep ?token=... (invite link), ?t=... (sign-in link from an email) and ?code=...&state=... (the answer
+        # from Google or Microsoft) out of the logs.
+        super().log_message(format, *(re.sub(r"\b(token|t|code|state)=[^&\s]*", r"\1=***", str(a)) for a in args))
 
 
 if __name__ == "__main__":

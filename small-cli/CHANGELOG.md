@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.8.0 — 2026-10-11
+
+### Added
+- **Sign in with Google and Microsoft.** `small sso google` and `small sso microsoft` print the steps and the exact
+  redirect URI to register, ask for the client ID and secret (hidden input), check them with the provider before
+  saving, and turn on **Sign in with Google / Microsoft** buttons in every template, Streamlit included. OpenID Connect
+  authorization code flow with PKCE, a `state` bound to the browser, `nonce`, audience/issuer/expiry checks, and each
+  answer accepted once. Only addresses the provider vouches for: verified Gmail or Google Workspace accounts (a
+  personal Google account registered with a company address is refused), and for Microsoft the members of your one
+  tenant (guests and other organizations are refused). Who may sign in is still the access list. With single sign-on
+  and no email set up, the sign-in page shows only the provider buttons.
+- **`small access log`** — who signed in, when, how and from which IP, plus refused sign-ins and access requests,
+  across deploys (`--json` for scripts). magic-link now writes these events as one JSON object per line, which
+  Railway shows as structured logs (`@magic_link:sign_in`). Also an MCP tool, `access_log`.
+- **`small access signout EMAIL|@DOMAIN|--all`** ends sessions on every device without taking access away, through
+  the new `SESSIONS_REVOKED` variable. `small access revoke` records the time too, so re-adding an address later does
+  not bring its old sessions back.
+- **`small volume add`** — a Railway volume (default `/data`) for the app's files. magic-link keeps its sign-in state
+  there in SQLite (`ACCESS_DB`, default `.magic-link.db` on the volume): used sign-in links stay used after a restart,
+  rate limits are shared by worker processes, and people get **Sign out on all devices**. Without a volume the state
+  stays in memory, as before. Node.js needs 22.13+ for SQLite and falls back to memory otherwise.
+- **A threat model** in [SECURITY.md](https://github.com/RuslanKazyradzi13/small-software/blob/main/SECURITY.md#threat-model):
+  what is protected, what we trust, every defense, the known limitations and how they are tested.
+- Sign-in pages send `X-Frame-Options: DENY` and a strict `Content-Security-Policy` (no scripts, forms only to the
+  app itself, no framing).
+
+### Changed
+- magic-link log lines for sign-ins and access requests are JSON (`message`, `level`, `magic_link`, `method`,
+  `user`, `ip`, `ua`); the `message` still follows `OWNER_LANG`. Greps for the old `signed in by email (…)` text need
+  updating: `signed in by email: …`.
+- `small access` and the dashboard warn only when nobody on the list can sign in (no email and no single sign-on).
+- The python-http and fastapi templates also mask `code=` and `state=` in their access logs.
+- CI tests magic-link on Node.js 22 and 24 (Node 20 is end-of-life).
+
+### Upgrading an app
+Copy the new `magic_link.py` (or `magic-link.js`) from `small init`'s templates into the app — for Streamlit, also
+the new `require_access()` from `app.py`. `small sso` and `small access signout` say so when the app's copy is older.
+
 ## 0.7.0 — 2026-10-11
 
 ### Added

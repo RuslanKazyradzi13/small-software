@@ -31,8 +31,8 @@ of users, not for an app that five colleagues open twice a week.
 - **One command to ship.** `small deploy` packs a folder, builds it on [Railway](https://railway.com) and prints an
   HTTPS URL — about 45 seconds for a small app.
 - **Private by default.** Every app starts behind an invite-only login. There is no public URL to leak.
-- **Shared like a Google Doc.** `small access add ivan@company.com` — Ivan signs in with his work email. Revoke him
-  in seconds; nobody else is affected.
+- **Shared like a Google Doc.** `small access add ivan@company.com` — Ivan signs in with his work Google or
+  Microsoft account, or with a one-time link sent to his email. Revoke him in seconds; nobody else is affected.
 
 > small follows the idea from Y Combinator's Request for Startups (Fall 2026),
 > [“A Cloud for Small Software”](https://www.ycombinator.com/rfs).
@@ -50,9 +50,9 @@ export RAILWAY_API_TOKEN=...               # Railway → Account Settings → To
 
 small init team-budget                     # a ready app with invite-only login
 cd team-budget
-small access add ivan@company.com          # who may sign in (or @company.com for the whole domain)
-small mail resend --to you@company.com     # how sign-in emails are sent
 small deploy                               # → https://team-budget.up.railway.app
+small access add @company.com              # who may sign in: one address or the whole domain
+small sso google                           # "Sign in with Google" (or: small sso microsoft, small mail resend)
 ```
 
 <p align="center">
@@ -72,17 +72,24 @@ secrets out of the chat; deleting apps stays a terminal-only command.
 
 ## Share it like a Google Doc
 
+You keep one list — addresses and whole domains. People prove they own an address in the way that suits your team:
+
+- **Sign in with Google or Microsoft** (`small sso google`, `small sso microsoft`). Google Workspace and Gmail
+  accounts; for Microsoft, the members of your organization only. Nothing to configure for email.
+- **A one-time link by email** (`small mail resend`). Works with any mailbox.
+
 <p align="center">
   <img src="docs/assets/sign-in-flow-en.png" alt="Sign-in flow: enter work email, get a one-time link, click Sign in, you are in" width="100%">
 </p>
 
-1. A colleague opens the app and enters a work email.
-2. If the address is on the list, a sign-in link arrives. It works **once** and for **15 minutes**.
-3. They click **Sign in** and stay signed in for 30 days.
+1. A colleague opens the app and signs in with a work account — or enters a work email.
+2. If the address is on the list, they are in (an emailed link works **once** and for **15 minutes**).
+3. The browser keeps them signed in for 30 days; **Sign out on all devices** ends every session.
 
 A forwarded link is useless: only the owner of the inbox gets in. An address that is not on the list gets the same
 answer — and the owner receives an access request (in the logs and, optionally, in Telegram) with a ready command:
-`small access add that@address.com`. Pages and emails switch between English and Russian by browser language.
+`small access add that@address.com`. `small access log` shows who signed in, when and how. Pages and emails switch
+between English and Russian by browser language.
 
 ## What you get
 
@@ -90,8 +97,12 @@ answer — and the owner receives an access request (in the logs and, optionally
 |---|---|
 | **Deploy** | `small deploy` — project, service, build, HTTPS domain and a short `<name>.up.railway.app` address |
 | **Access by email** | `small access add ivan@company.com` or `@company.com`; `small access revoke` closes even open sessions |
+| **Sign in with Google / Microsoft** | `small sso google`, `small sso microsoft` — OpenID Connect with PKCE; checks the credentials before saving |
 | **Personal invite links** | `small access add bob` — a token per person, when email is not an option |
 | **Sign-in emails** | `small mail resend` (HTTPS, works on Railway Hobby) or `small mail smtp`; a test email is sent before saving |
+| **Access log** | `small access log` — who signed in, when, how and from where, across deploys |
+| **Sign out everywhere** | `small access signout ivan@company.com` (or `--all`); the person can do it too, with a volume |
+| **Persistent disk** | `small volume add` — files survive deploys; sign-in state is kept there too |
 | **Access requests** | unknown emails become requests; `small notify telegram` forwards them to you |
 | **Database** | `small db add postgres` → `DATABASE_URL` in the app; removed together with the app |
 | **Sleep** | `small sleep on` — idle apps sleep and cost almost nothing; they wake in ~1.7 s |
@@ -119,15 +130,19 @@ FastAPI, Starlette) and a middleware for Node.js (Express, plain `http`). `small
 
 ## Security model
 
-- Sign-in links and sessions are signed with HMAC-SHA256 (`SESSION_SECRET`) and scoped by purpose: a link cannot be
-  used as a session, and vice versa.
-- Links are single-use and expire in 15 minutes. Signing in takes a button press, so corporate mail scanners that open
-  links do not burn them.
-- The same response for known and unknown addresses; at most 3 emails per address and 10 requests per IP in 15 minutes.
-- The link in the email is built from `PUBLIC_URL`, never from the `Host` header, so it cannot be redirected to an
-  attacker's domain.
-- Removing an address closes its sessions on the next restart — `small access revoke` restarts the app for you.
-- Tokens never appear in logs; the local dashboard listens on `127.0.0.1` only and checks the `Host` header.
+small's promise is narrow and checkable: only the addresses you list get past the sign-in page. The
+[threat model](SECURITY.md#threat-model) lists every defense, every known limitation and how each is tested. In short:
+
+- **Deny by default.** Every request — pages, API, `/docs` — needs a valid session of an address on the list.
+- **Standard sign-on.** Google and Microsoft through OpenID Connect: authorization code flow with PKCE, `state` bound to
+  the browser, `nonce`, audience, issuer and expiry checks. Only addresses the provider vouches for: Google Workspace
+  or Gmail, and for Microsoft the members of your own tenant (no guests, no other organizations).
+- **Email links** are signed (HMAC-SHA256), single-use, valid for 15 minutes and spent only by a button press, so mail
+  scanners don't burn them. Known and unknown addresses get the same answer; sending is rate-limited.
+- **Revocation that sticks.** Removing an address ends its sessions; `small access signout` ends them on every device
+  without removing access. With a volume, used links stay used across restarts.
+- **No secrets in logs**, sign-in pages that can't be framed or run scripts, and a local dashboard that only
+  `127.0.0.1` can reach.
 
 Report a vulnerability privately — see [SECURITY.md](SECURITY.md).
 
@@ -137,11 +152,13 @@ Report a vulnerability privately — see [SECURITY.md](SECURITY.md).
 small init [dir] [--template python-http|fastapi|node-http|streamlit]
 small deploy [dir] [--name NAME]                 # build and print the URL
 small open | link [--as NAME]                    # open the app as the owner / print an invite link
-small access [list | add EMAIL|@DOMAIN|NAME | revoke EMAIL|NAME]
+small access [list | add EMAIL|@DOMAIN|NAME | revoke EMAIL|NAME | log | signout EMAIL|--all]
+small sso [google | microsoft | off]             # "Sign in with Google / Microsoft"
 small mail [resend | smtp | log | off]           # how sign-in emails are sent
 small notify [telegram | off]                    # access requests to Telegram
 small env [list | set K=V | unset K]
 small db [list | add postgres | remove postgres]
+small volume [add [--mount /data]]               # a persistent disk
 small domain [list | add DOMAIN | remove DOMAIN]
 small sleep [on | off]
 small logs [-f] [--build]
@@ -168,16 +185,18 @@ Full CLI reference: [small-cli/README.md](small-cli/README.md) · [по-русс
 - [x] `pip install small-software` from PyPI
 - [x] “Share” button in the dashboard — no terminal needed
 - [x] Email sign-in for the Streamlit template
-- [ ] Hosted mode — no Railway account needed
 - [x] Deploy and share straight from AI coding agents (MCP)
+- [x] Sign in with Google and Microsoft; access log; sign out on all devices; persistent volumes
+- [ ] Protection in front of the app (a gateway), for any language without code changes
+- [ ] Hosted mode — no Railway account needed
 - [ ] Company workspace: app catalog, owners, audit log
 
 ## Development
 
 ```bash
-cd small-cli   && python -m unittest discover -s tests     # 160 tests (+ real FastAPI/Streamlit when installed)
-cd magic-link  && python -m unittest test_magic_link       # 65 tests
-cd magic-link  && node --test                              # 20 tests
+cd small-cli   && python -m unittest discover -s tests     # 180 tests (+ real FastAPI/Streamlit when installed)
+cd magic-link  && python -m unittest test_magic_link       # 97 tests
+cd magic-link  && node --test                              # 31 tests
 ```
 
 GitHub Actions runs everything on Windows, macOS and Linux. See [CONTRIBUTING.md](CONTRIBUTING.md) and the
