@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/RuslanKazyradzi13/small-software/actions/workflows/tests.yml"><img src="https://github.com/RuslanKazyradzi13/small-software/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
-  <a href="https://pypi.org/project/small-cli/"><img src="https://img.shields.io/pypi/v/small-cli?color=3DDC84&label=PyPI" alt="PyPI"></a>
+  <a href="https://pypi.org/project/small-software/"><img src="https://img.shields.io/pypi/v/small-software?color=3DDC84&label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/node-18%2B-339933?logo=nodedotjs&logoColor=white" alt="Node.js 18+">
   <img src="https://img.shields.io/badge/зависимости-0-3DDC84" alt="Без зависимостей">
@@ -45,7 +45,7 @@
 ## Быстрый старт
 
 ```bash
-pip install small-cli                      # или: pipx install small-cli
+pip install small-software                      # или: pipx install small-software
 export RAILWAY_API_TOKEN=...               # Railway → Account Settings → Tokens
 
 small init team-budget                     # готовое приложение со входом для приглашённых
@@ -118,7 +118,7 @@ Starlette) и Node.js (Express, чистый `http`). `small init` кладёт 
 
 ## Установка
 
-- **Везде:** `pip install small-cli` (или `pipx install small-cli`). Python 3.9+, без зависимостей.
+- **Везде:** `pip install small-software` (или `pipx install small-software`). Python 3.9+, без зависимостей.
 - **Windows:** если Smart App Control блокирует неподписанный `small.exe`, который создаёт pip, запускайте
   `python -m small_cli` или склонируйте репозиторий и добавьте его папку `small-cli` в `PATH` — команду обслужит `small.cmd`.
 - **Язык:** русский или английский — по языку системы. Задать явно: `SMALL_LANG=ru` или `SMALL_LANG=en`.
@@ -131,7 +131,7 @@ Starlette) и Node.js (Express, чистый `http`). `small init` кладёт 
 - [x] Деплой одной командой, сон, Postgres, свои домены, дашборд с оценкой расхода
 - [x] Вход по рабочей почте; личные ссылки; запросы доступа в Telegram
 - [x] Русский и английский: CLI, страницы входа, письма
-- [x] `pip install small-cli` из PyPI
+- [x] `pip install small-software` из PyPI
 - [ ] Кнопка «Поделиться» в дашборде — без терминала
 - [ ] Вход по почте в шаблоне Streamlit
 - [ ] Облако без своего аккаунта Railway

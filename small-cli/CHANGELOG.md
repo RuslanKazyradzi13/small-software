@@ -6,7 +6,7 @@
 - **English CLI.** Every message, prompt, error, `--help` text and the `small dashboard` page now exist in English
   and Russian. small picks Russian when the system language is Russian (`LC_ALL`/`LC_MESSAGES`/`LANG`/`LANGUAGE`,
   or the Windows display language) and English otherwise; `SMALL_LANG=en|ru` forces one.
-- **On PyPI:** `pip install small-cli` (or `pipx install small-cli`). Releases are published from GitHub Actions
+- **On PyPI:** `pip install small-software` (or `pipx install small-software`). Releases are published from GitHub Actions
   with Trusted Publishing — no API tokens stored anywhere.
 - **`OWNER_LANG`** for apps: the owner's log lines and Telegram access requests from `magic-link` (and the
   streamlit template) are in English or Russian. `small deploy` sets it to small's language unless `small.json`

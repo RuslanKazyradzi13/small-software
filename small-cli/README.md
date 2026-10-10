@@ -31,10 +31,10 @@ Python 3.9+, no dependencies.
 ## Install
 
 ```bash
-pip install small-cli
+pip install small-software
 ```
 
-The command is `small`. With [pipx](https://pipx.pypa.io): `pipx install small-cli`.
+The command is `small`. With [pipx](https://pipx.pypa.io): `pipx install small-software`.
 
 From source, in a clone of the repository:
 

@@ -1,6 +1,6 @@
 name: publish
 
-# Публикация small-cli на PyPI при выпуске релиза на GitHub. Без токенов: PyPI доверяет этому workflow
+# Публикация small-software на PyPI при выпуске релиза на GitHub. Без токенов: PyPI доверяет этому workflow
 # (Trusted Publishing, https://docs.pypi.org/trusted-publishers/). Запуск вручную только собирает пакет.
 on:
   release:
@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/small-cli
+      url: https://pypi.org/p/small-software
     permissions:
       id-token: write
     steps:

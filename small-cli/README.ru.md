@@ -27,10 +27,10 @@ Python 3.9+, без внешних зависимостей.
 ## Установка
 
 ```bash
-pip install small-cli
+pip install small-software
 ```
 
-Пакет ставится с PyPI, команда — `small`. Через [pipx](https://pipx.pypa.io): `pipx install small-cli`.
+Пакет ставится с PyPI, команда — `small`. Через [pipx](https://pipx.pypa.io): `pipx install small-software`.
 
 Из исходников, в клоне репозитория:
 

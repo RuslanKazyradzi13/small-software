@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/RuslanKazyradzi13/small-software/actions/workflows/tests.yml"><img src="https://github.com/RuslanKazyradzi13/small-software/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
-  <a href="https://pypi.org/project/small-cli/"><img src="https://img.shields.io/pypi/v/small-cli?color=3DDC84&label=PyPI" alt="PyPI"></a>
+  <a href="https://pypi.org/project/small-software/"><img src="https://img.shields.io/pypi/v/small-software?color=3DDC84&label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/node-18%2B-339933?logo=nodedotjs&logoColor=white" alt="Node.js 18+">
   <img src="https://img.shields.io/badge/dependencies-0-3DDC84" alt="Zero dependencies">
@@ -45,7 +45,7 @@ of users, not for an app that five colleagues open twice a week.
 ## Quick start
 
 ```bash
-pip install small-cli                      # or: pipx install small-cli
+pip install small-software                      # or: pipx install small-software
 export RAILWAY_API_TOKEN=...               # Railway → Account Settings → Tokens
 
 small init team-budget                     # a ready app with invite-only login
@@ -138,7 +138,7 @@ small destroy                                    # remove the app and its databa
 
 ## Install
 
-- **Everywhere:** `pip install small-cli` (or `pipx install small-cli`). Python 3.9+, no dependencies.
+- **Everywhere:** `pip install small-software` (or `pipx install small-software`). Python 3.9+, no dependencies.
 - **Windows:** if Smart App Control blocks the unsigned `small.exe` that pip creates, run `python -m small_cli`
   instead, or clone the repo and add its `small-cli` folder to `PATH` — `small.cmd` then serves the command.
 - **Language:** English or Russian, picked from your system language. Force one with `SMALL_LANG=en` or `SMALL_LANG=ru`.
@@ -151,7 +151,7 @@ Full CLI reference: [small-cli/README.md](small-cli/README.md) · [по-русс
 - [x] One-command deploy, sleep, Postgres, custom domains, dashboard with cost estimate
 - [x] Sign-in by work email; personal invite links; access requests to Telegram
 - [x] English and Russian: CLI, sign-in pages, emails
-- [x] `pip install small-cli` from PyPI
+- [x] `pip install small-software` from PyPI
 - [ ] “Share” button in the dashboard — no terminal needed
 - [ ] Email sign-in for the Streamlit template
 - [ ] Hosted mode — no Railway account needed
