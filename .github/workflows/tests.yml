@@ -1,0 +1,62 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  small-cli:
+    name: small-cli · ${{ matrix.os }} · Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.13"]
+        include:
+          - os: ubuntu-latest
+            python: "3.9"
+          - os: windows-latest
+            python: "3.9"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4  # для теста шаблона node-http
+        with:
+          node-version: "20"
+      - name: Тесты (без Streamlit — его тесты пропускаются)
+        working-directory: small-cli
+        run: python -m unittest discover -s tests -v
+
+  streamlit-template:
+    name: small-cli · шаблон streamlit на настоящем Streamlit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "streamlit>=1.40,<2"
+      - name: Тесты шаблона streamlit
+        working-directory: small-cli
+        run: python -m unittest discover -s tests -k StreamlitTemplateTest -v
+
+  magic-link:
+    name: magic-link · Python + Node.js
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Python (WSGI)
+        working-directory: magic-link
+        run: python -m unittest test_magic_link -v
+      - name: Node.js
+        working-directory: magic-link
+        run: node --test
