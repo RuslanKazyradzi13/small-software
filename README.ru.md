@@ -8,6 +8,7 @@
   <img src="https://img.shields.io/badge/node-18%2B-339933?logo=nodedotjs&logoColor=white" alt="Node.js 18+">
   <img src="https://img.shields.io/badge/зависимости-0-3DDC84" alt="Без зависимостей">
   <a href="LICENSE"><img src="https://img.shields.io/badge/лицензия-MIT-FFB020" alt="Лицензия MIT"></a>
+  <img src="https://img.shields.io/badge/статус-бета-8A63D2" alt="Статус: бета">
   <a href="README.md"><img src="https://img.shields.io/badge/README-in_English-11151B" alt="README in English"></a>
 </p>
 
@@ -35,9 +36,15 @@
 > small развивает идею из Request for Startups Y Combinator (осень 2026)
 > [«A Cloud for Small Software»](https://www.ycombinator.com/rfs).
 
+> [!NOTE]
+> **Бета.** small работает от начала до конца и проверен на Windows, macOS и Linux, но проект молодой: шероховатости
+> возможны. Если что-то сломалось — [откройте issue](https://github.com/RuslanKazyradzi13/small-software/issues).
+> Страницы входа и письма — на русском и английском; **сообщения CLI пока только на русском**, английский — следующим.
+
 ## Быстрый старт
 
 ```bash
+git clone https://github.com/RuslanKazyradzi13/small-software && cd small-software
 pip install ./small-cli                    # Windows: вместо этого добавьте small-cli/ в PATH (ниже)
 export RAILWAY_API_TOKEN=...               # Railway → Account Settings → Tokens
 
@@ -122,7 +129,9 @@ Starlette) и Node.js (Express, чистый `http`). `small init` кладёт 
 
 - [x] Деплой одной командой, сон, Postgres, свои домены, дашборд с оценкой расхода
 - [x] Вход по рабочей почте; личные ссылки; запросы доступа в Telegram
-- [x] Интерфейс на русском и английском
+- [x] Страницы входа и письма на русском и английском
+- [ ] Сообщения CLI и справочник на английском
+- [ ] `pip install small-cli` из PyPI
 - [ ] Кнопка «Поделиться» в дашборде — без терминала
 - [ ] Вход по почте в шаблоне Streamlit
 - [ ] Облако без своего аккаунта Railway

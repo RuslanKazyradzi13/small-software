@@ -8,6 +8,7 @@
   <img src="https://img.shields.io/badge/node-18%2B-339933?logo=nodedotjs&logoColor=white" alt="Node.js 18+">
   <img src="https://img.shields.io/badge/dependencies-0-3DDC84" alt="Zero dependencies">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-FFB020" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/status-beta-8A63D2" alt="Status: beta">
   <a href="README.ru.md"><img src="https://img.shields.io/badge/README-по--русски-11151B" alt="README по-русски"></a>
 </p>
 
@@ -35,9 +36,15 @@ of users, not for an app that five colleagues open twice a week.
 > small follows the idea from Y Combinator's Request for Startups (Fall 2026),
 > [“A Cloud for Small Software”](https://www.ycombinator.com/rfs).
 
+> [!NOTE]
+> **Beta.** small works end to end and is tested on Windows, macOS and Linux, but it is young: expect rough edges
+> and please [open an issue](https://github.com/RuslanKazyradzi13/small-software/issues) when something breaks.
+> Sign-in pages and emails speak English and Russian; **CLI messages are in Russian for now** — English is next.
+
 ## Quick start
 
 ```bash
+git clone https://github.com/RuslanKazyradzi13/small-software && cd small-software
 pip install ./small-cli                    # Windows: add small-cli/ to PATH instead (see below)
 export RAILWAY_API_TOKEN=...               # Railway → Account Settings → Tokens
 
@@ -142,7 +149,9 @@ Full CLI reference (in Russian): [small-cli/README.md](small-cli/README.md).
 
 - [x] One-command deploy, sleep, Postgres, custom domains, dashboard with cost estimate
 - [x] Sign-in by work email; personal invite links; access requests to Telegram
-- [x] English and Russian interface
+- [x] Sign-in pages and emails in English and Russian
+- [ ] English CLI messages and CLI reference
+- [ ] `pip install small-cli` from PyPI
 - [ ] “Share” button in the dashboard — no terminal needed
 - [ ] Email sign-in for the Streamlit template
 - [ ] Hosted mode — no Railway account needed

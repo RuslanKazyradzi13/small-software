@@ -24,10 +24,11 @@ Python 3.8+, без внешних зависимостей.
 
 ## Установка
 
-**Windows (рекомендуется):** добавьте папку `small-cli` в `PATH`. Команду `small` будет обслуживать `small.cmd`:
+**Windows (рекомендуется):** добавьте папку `small-cli` в `PATH`. Команду `small` будет обслуживать `small.cmd`.
+Выполните в корне скачанного репозитория (`$PWD` подставит его путь), затем откройте новый терминал:
 
 ```powershell
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";D:\Small Software\small-cli", "User")
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$PWD\small-cli", "User")
 ```
 
 `pip install` тоже работает, но создаёт неподписанный `small.exe`, который Smart App Control / Application Control
